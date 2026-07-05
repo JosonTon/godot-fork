@@ -1046,6 +1046,15 @@ layout(location = 4) out float depth_output_buffer;
 
 #endif // MODE_RENDER_MATERIAL
 
+#ifdef MODE_RENDER_TEXEL_GBUFFER
+
+layout(location = 0) out vec4 texel_albedo_output_buffer;
+layout(location = 1) out vec4 texel_normal_output_buffer;
+layout(location = 2) out float texel_radial_depth_output_buffer;
+layout(location = 3) out uint texel_object_id_output_buffer;
+
+#endif // MODE_RENDER_TEXEL_GBUFFER
+
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 layout(location = 0) out vec4 normal_roughness_output_buffer;
 
@@ -3014,6 +3023,19 @@ void fragment_shader(in SceneData scene_data) {
 
 	emission_output_buffer.rgb = emission;
 	emission_output_buffer.a = 0.0;
+#endif
+
+#ifdef MODE_RENDER_TEXEL_GBUFFER
+
+	texel_albedo_output_buffer.rgb = albedo;
+	texel_albedo_output_buffer.a = alpha;
+
+	texel_normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
+	texel_normal_output_buffer.a = 0.0;
+
+	// Temporary camera-space depth until the probe pass provides Chebyshev radial depth inputs.
+	texel_radial_depth_output_buffer = -vertex.z;
+	texel_object_id_output_buffer = 0u;
 #endif
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS

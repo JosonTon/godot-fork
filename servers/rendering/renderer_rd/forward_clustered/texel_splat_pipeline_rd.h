@@ -56,14 +56,27 @@ class TexelSplatPipelineRD {
 		uint32_t usage_bits = 0;
 	};
 
+	struct ProbeLayerData {
+		RID albedo_view;
+		RID normal_view;
+		RID radial_view;
+		RID object_id_view;
+		RID depth_view;
+		RID framebuffer;
+	};
+
 	ProbeTextureData probe_textures[PROBE_TEXTURE_MAX];
+	ProbeLayerData probe_layers[PROBE_LAYER_COUNT];
 	bool initialized = false;
 
 	bool _create_probe_textures();
+	bool _create_probe_framebuffers();
 	bool _is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RD::DataFormat _select_depth_format(uint32_t p_usage_bits) const;
 	RID _create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
+	RID _create_probe_texture_slice(RID p_texture, uint32_t p_layer, const char *p_label) const;
 	void _free_probe_textures();
+	void _free_probe_framebuffers();
 
 public:
 	bool initialize();
@@ -71,6 +84,8 @@ public:
 	bool is_initialized() const { return initialized; }
 	uint32_t get_probe_size() const { return PROBE_SIZE; }
 	uint32_t get_probe_layer_count() const { return PROBE_LAYER_COUNT; }
+	RID get_probe_layer_framebuffer(uint32_t p_layer) const;
+	RD::FramebufferFormatID get_probe_framebuffer_format() const;
 
 	TexelSplatPipelineRD();
 	~TexelSplatPipelineRD();

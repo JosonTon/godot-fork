@@ -50,13 +50,32 @@ bool TexelSplatPipelineRD::initialize() {
 		return false;
 	}
 
+	if (!_create_probe_framebuffers()) {
+		free();
+		return false;
+	}
+
 	initialized = true;
 	return true;
 }
 
 void TexelSplatPipelineRD::free() {
+	_free_probe_framebuffers();
 	_free_probe_textures();
 	initialized = false;
+}
+
+RID TexelSplatPipelineRD::get_probe_layer_framebuffer(uint32_t p_layer) const {
+	ERR_FAIL_INDEX_V(p_layer, PROBE_LAYER_COUNT, RID());
+	return probe_layers[p_layer].framebuffer;
+}
+
+RD::FramebufferFormatID TexelSplatPipelineRD::get_probe_framebuffer_format() const {
+	if (!probe_layers[0].framebuffer.is_valid()) {
+		return RD::INVALID_ID;
+	}
+
+	return RD::get_singleton()->framebuffer_get_format(probe_layers[0].framebuffer);
 }
 
 bool TexelSplatPipelineRD::_create_probe_textures() {
@@ -97,6 +116,30 @@ bool TexelSplatPipelineRD::_create_probe_textures() {
 	return true;
 }
 
+bool TexelSplatPipelineRD::_create_probe_framebuffers() {
+	for (uint32_t layer = 0; layer < PROBE_LAYER_COUNT; layer++) {
+		ProbeLayerData &probe_layer = probe_layers[layer];
+
+		probe_layer.albedo_view = _create_probe_texture_slice(probe_textures[PROBE_TEXTURE_ALBEDO].texture, layer, "albedo");
+		probe_layer.normal_view = _create_probe_texture_slice(probe_textures[PROBE_TEXTURE_NORMAL].texture, layer, "normal");
+		probe_layer.radial_view = _create_probe_texture_slice(probe_textures[PROBE_TEXTURE_RADIAL].texture, layer, "radial depth");
+		probe_layer.object_id_view = _create_probe_texture_slice(probe_textures[PROBE_TEXTURE_OBJECT_ID].texture, layer, "object id");
+		probe_layer.depth_view = _create_probe_texture_slice(probe_textures[PROBE_TEXTURE_DEPTH].texture, layer, "depth");
+
+		Vector<RID> attachments;
+		attachments.push_back(probe_layer.albedo_view);
+		attachments.push_back(probe_layer.normal_view);
+		attachments.push_back(probe_layer.radial_view);
+		attachments.push_back(probe_layer.object_id_view);
+		attachments.push_back(probe_layer.depth_view);
+
+		probe_layer.framebuffer = RD::get_singleton()->framebuffer_create(attachments);
+		ERR_FAIL_COND_V_MSG(probe_layer.framebuffer.is_null(), false, "Failed to create texel splatting probe layer framebuffer.");
+	}
+
+	return true;
+}
+
 bool TexelSplatPipelineRD::_is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const {
 	const bool supported = RD::get_singleton()->texture_is_format_supported_for_usage(p_format, p_usage_bits);
 	ERR_FAIL_COND_V_MSG(!supported, false, "Texel splatting probe texture '" + String(p_label) + "' requires unsupported RD texture usage bits.");
@@ -128,6 +171,12 @@ RID TexelSplatPipelineRD::_create_probe_texture(RD::DataFormat p_format, uint32_
 	return texture;
 }
 
+RID TexelSplatPipelineRD::_create_probe_texture_slice(RID p_texture, uint32_t p_layer, const char *p_label) const {
+	RID texture_slice = RD::get_singleton()->texture_create_shared_from_slice(RD::TextureView(), p_texture, p_layer, 0);
+	ERR_FAIL_COND_V_MSG(texture_slice.is_null(), RID(), "Failed to create texel splatting probe texture slice '" + String(p_label) + "'.");
+	return texture_slice;
+}
+
 void TexelSplatPipelineRD::_free_probe_textures() {
 	for (uint32_t i = 0; i < PROBE_TEXTURE_MAX; i++) {
 		ProbeTextureData &texture = probe_textures[i];
@@ -137,6 +186,37 @@ void TexelSplatPipelineRD::_free_probe_textures() {
 		}
 		texture.format = RD::DATA_FORMAT_MAX;
 		texture.usage_bits = 0;
+	}
+}
+
+void TexelSplatPipelineRD::_free_probe_framebuffers() {
+	for (uint32_t i = 0; i < PROBE_LAYER_COUNT; i++) {
+		ProbeLayerData &probe_layer = probe_layers[i];
+
+		if (probe_layer.framebuffer.is_valid()) {
+			RD::get_singleton()->free_rid(probe_layer.framebuffer);
+			probe_layer.framebuffer = RID();
+		}
+		if (probe_layer.albedo_view.is_valid()) {
+			RD::get_singleton()->free_rid(probe_layer.albedo_view);
+			probe_layer.albedo_view = RID();
+		}
+		if (probe_layer.normal_view.is_valid()) {
+			RD::get_singleton()->free_rid(probe_layer.normal_view);
+			probe_layer.normal_view = RID();
+		}
+		if (probe_layer.radial_view.is_valid()) {
+			RD::get_singleton()->free_rid(probe_layer.radial_view);
+			probe_layer.radial_view = RID();
+		}
+		if (probe_layer.object_id_view.is_valid()) {
+			RD::get_singleton()->free_rid(probe_layer.object_id_view);
+			probe_layer.object_id_view = RID();
+		}
+		if (probe_layer.depth_view.is_valid()) {
+			RD::get_singleton()->free_rid(probe_layer.depth_view);
+			probe_layer.depth_view = RID();
+		}
 	}
 }
 
