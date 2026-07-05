@@ -3033,9 +3033,8 @@ void fragment_shader(in SceneData scene_data) {
 	texel_normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
 	texel_normal_output_buffer.a = 0.0;
 
-	// Temporary camera-space depth until the probe pass provides Chebyshev radial depth inputs.
-	texel_radial_depth_output_buffer = -vertex.z;
-	texel_object_id_output_buffer = 0u;
+	texel_radial_depth_output_buffer = max(abs(vertex.x), max(abs(vertex.y), abs(vertex.z)));
+	texel_object_id_output_buffer = floatBitsToUint(instances.data[instance_index].compressed_aabb_position_pad.w);
 #endif
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS

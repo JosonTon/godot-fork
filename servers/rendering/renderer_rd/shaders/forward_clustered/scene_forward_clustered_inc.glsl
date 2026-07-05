@@ -351,7 +351,7 @@ implementation_data_block;
 
 struct InstanceData {
 	mat3x4 transform;
-	vec4 compressed_aabb_position_pad; // Only .xyz is used. .w is padding.
+	vec4 compressed_aabb_position_pad; // .xyz is compressed AABB position, .w stores texel object id bits.
 	vec4 compressed_aabb_size_pad; // Only .xyz is used. .w is padding.
 	vec4 uv_scale;
 	uint flags;

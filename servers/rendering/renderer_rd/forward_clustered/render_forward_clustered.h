@@ -90,6 +90,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	SceneShaderForwardClustered scene_shader;
 	bool texel_splatting_enabled = false;
 	TexelSplatPipelineRD *texel_splat_pipeline = nullptr;
+	uint32_t next_texel_object_id = 1;
 
 public:
 	/* Framebuffer */
@@ -382,6 +383,11 @@ private:
 #endif
 			}
 
+			inline void set_texel_object_id(uint32_t p_object_id) {
+				static_assert(sizeof(compressed_aabb_position[3]) == sizeof(p_object_id));
+				memcpy(&compressed_aabb_position[3], &p_object_id, sizeof(p_object_id));
+			}
+
 			inline void set_uv_scale(const Vector4 &p_uv_scale) {
 #ifdef REAL_T_IS_DOUBLE
 				uv_scale[0] = p_uv_scale.x;
@@ -572,6 +578,7 @@ private:
 		uint32_t gi_offset_cache = 0;
 		bool store_transform_cache = true;
 		RID transforms_uniform_set;
+		uint32_t texel_object_id = 0;
 		uint32_t instance_count = 0;
 		uint32_t trail_steps = 1;
 		bool can_sdfgi = false;
