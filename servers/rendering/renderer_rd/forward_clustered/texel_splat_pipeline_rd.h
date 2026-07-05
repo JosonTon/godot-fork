@@ -30,15 +30,47 @@
 
 #pragma once
 
+#include "servers/rendering/rendering_device.h"
+
 namespace RendererSceneRenderImplementation {
 
 class TexelSplatPipelineRD {
+	static const uint32_t PROBE_SIZE = 384;
+	static const uint32_t PROBE_COUNT = 3;
+	static const uint32_t PROBE_FACE_COUNT = 6;
+	static const uint32_t PROBE_LAYER_COUNT = PROBE_COUNT * PROBE_FACE_COUNT;
+
+	enum ProbeTexture {
+		PROBE_TEXTURE_ALBEDO,
+		PROBE_TEXTURE_NORMAL,
+		PROBE_TEXTURE_RADIAL,
+		PROBE_TEXTURE_OBJECT_ID,
+		PROBE_TEXTURE_DEPTH,
+		PROBE_TEXTURE_LIT,
+		PROBE_TEXTURE_MAX
+	};
+
+	struct ProbeTextureData {
+		RID texture;
+		RD::DataFormat format = RD::DATA_FORMAT_MAX;
+		uint32_t usage_bits = 0;
+	};
+
+	ProbeTextureData probe_textures[PROBE_TEXTURE_MAX];
 	bool initialized = false;
 
+	bool _create_probe_textures();
+	bool _is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
+	RD::DataFormat _select_depth_format(uint32_t p_usage_bits) const;
+	RID _create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
+	void _free_probe_textures();
+
 public:
-	void initialize();
+	bool initialize();
 	void free();
 	bool is_initialized() const { return initialized; }
+	uint32_t get_probe_size() const { return PROBE_SIZE; }
+	uint32_t get_probe_layer_count() const { return PROBE_LAYER_COUNT; }
 
 	TexelSplatPipelineRD();
 	~TexelSplatPipelineRD();

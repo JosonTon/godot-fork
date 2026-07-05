@@ -5107,7 +5107,12 @@ RenderForwardClustered::RenderForwardClustered() {
 
 	if (texel_splatting_enabled) {
 		texel_splat_pipeline = memnew(TexelSplatPipelineRD);
-		texel_splat_pipeline->initialize();
+		if (!texel_splat_pipeline->initialize()) {
+			memdelete(texel_splat_pipeline);
+			texel_splat_pipeline = nullptr;
+			texel_splatting_enabled = false;
+			WARN_PRINT("Texel splatting was requested, but required RD probe texture formats are not supported by this device.");
+		}
 	}
 
 	/* SCENE SHADER */
