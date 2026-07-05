@@ -3294,8 +3294,9 @@ void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Ve
 	RSG::particles_storage->particles_set_view_axis(p_particles, p_axis, p_up_axis);
 }
 
-void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info) {
+void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info, int p_texel_probe_layer) {
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
+	const bool is_texel_probe_capture = p_texel_probe_layer >= 0;
 
 	// Prepare the light - camera volume culling system.
 	light_culler->prepare_camera(p_camera_data->main_transform, p_camera_data->main_projection);
@@ -3309,7 +3310,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	scene_render->set_scene_pass(render_pass);
 
-	if (p_reflection_probe.is_null()) {
+	if (p_reflection_probe.is_null() && !is_texel_probe_capture) {
 		//no rendering code here, this is only to set up what needs to be done, request regions, etc.
 		scene_render->sdfgi_update(p_render_buffers, p_environment, camera_position); //update conditions for SDFGI (whether its used or not)
 	}
@@ -3391,7 +3392,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	{ //sdfgi
 		cull.sdfgi.region_count = 0;
 
-		if (p_reflection_probe.is_null()) {
+		if (p_reflection_probe.is_null() && !is_texel_probe_capture) {
 			cull.sdfgi.cascade_light_count = 0;
 
 			uint32_t prev_cascade = 0xFFFFFFFF;
@@ -3674,7 +3675,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
-		if (p_reflection_probe.is_null()) {
+		if (p_reflection_probe.is_null() && !is_texel_probe_capture) {
 			sdfgi_update_data.directional_lights = &directional_lights;
 			sdfgi_update_data.positional_light_instances = scenario->dynamic_lights.ptr();
 			sdfgi_update_data.positional_light_count = scenario->dynamic_lights.size();
@@ -3702,10 +3703,15 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		prev_camera_data = RSG::viewport->viewport_get_prev_camera_data(p_viewport);
 	}
 
-	RENDER_TIMESTAMP("Render 3D Scene");
-	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
+	if (is_texel_probe_capture) {
+		RENDER_TIMESTAMP("Render Texel Probe G-buffer");
+		scene_render->render_texel_splat_probe_gbuffer(p_camera_data, scene_cull_result.geometry_instances, p_environment, camera_attributes, uint32_t(p_texel_probe_layer), p_screen_mesh_lod_threshold);
+	} else {
+		RENDER_TIMESTAMP("Render 3D Scene");
+		scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
+	}
 
-	if (p_viewport.is_valid()) {
+	if (p_viewport.is_valid() && !is_texel_probe_capture) {
 		RSG::viewport->viewport_set_prev_camera_data(p_viewport, p_camera_data);
 	}
 
@@ -3716,6 +3722,63 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	for (uint32_t i = 0; i < cull.sdfgi.region_count; i++) {
 		render_sdfgi_data[i].instances.clear();
+	}
+
+	if (!is_texel_probe_capture && p_reflection_probe.is_null() && scene_render->is_texel_splatting_enabled()) {
+		_render_texel_splat_probe_captures(p_camera_data, p_render_buffers, p_environment, p_force_camera_attributes, p_visible_layers, p_scenario, p_shadow_atlas, p_screen_mesh_lod_threshold, p_window_output_max_value);
+	}
+}
+
+void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, uint32_t p_visible_layers, RID p_scenario, RID p_shadow_atlas, float p_screen_mesh_lod_threshold, float p_window_output_max_value) {
+	const uint32_t probe_count = scene_render->get_texel_splatting_probe_count();
+	if (probe_count == 0) {
+		return;
+	}
+
+	static const Vector3 view_normals[6] = {
+		Vector3(+1, 0, 0),
+		Vector3(-1, 0, 0),
+		Vector3(0, +1, 0),
+		Vector3(0, -1, 0),
+		Vector3(0, 0, +1),
+		Vector3(0, 0, -1)
+	};
+	static const Vector3 view_up[6] = {
+		Vector3(0, -1, 0),
+		Vector3(0, -1, 0),
+		Vector3(0, 0, +1),
+		Vector3(0, 0, -1),
+		Vector3(0, -1, 0),
+		Vector3(0, -1, 0)
+	};
+
+	float max_distance = p_camera_data->main_projection.get_z_far();
+	if (max_distance <= 0.01f) {
+		max_distance = 256.0f;
+	}
+
+	const Vector3 forward = -p_camera_data->main_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+	const float probe_spacing = MIN(max_distance * 0.25f, 16.0f);
+	const uint32_t face_count = 6;
+
+	for (uint32_t probe = 0; probe < probe_count; probe++) {
+		Transform3D probe_transform;
+		probe_transform.origin = p_camera_data->main_transform.origin + forward * probe_spacing * float(probe);
+
+		for (uint32_t face = 0; face < face_count; face++) {
+			Projection cm;
+			cm.set_perspective(90, 1, 0.01, max_distance);
+
+			Transform3D local_view;
+			local_view.set_look_at(Vector3(), view_normals[face], view_up[face]);
+
+			RendererSceneRender::CameraData camera_data;
+			camera_data.set_camera(probe_transform * local_view, cm, false, false, Vector2(), 0.0f, p_camera_data->visible_layers);
+
+			const uint32_t layer = probe * face_count + face;
+			RENDER_TIMESTAMP("Render Texel Probe " + itos(probe) + ", Face " + itos(face));
+			_render_scene(&camera_data, p_render_buffers, p_environment, p_force_camera_attributes, RID(), p_visible_layers, p_scenario, RID(), p_shadow_atlas, RID(), 0, p_screen_mesh_lod_threshold, p_window_output_max_value, false, nullptr, int(layer));
+		}
 	}
 }
 

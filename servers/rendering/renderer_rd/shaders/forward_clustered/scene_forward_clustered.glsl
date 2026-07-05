@@ -1189,7 +1189,7 @@ uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
 
 #endif //!MODE_RENDER DEPTH
 
-#if defined(MODE_RENDER_NORMAL_ROUGHNESS) || defined(MODE_RENDER_MATERIAL)
+#if defined(MODE_RENDER_NORMAL_ROUGHNESS) || defined(MODE_RENDER_MATERIAL) || defined(MODE_RENDER_TEXEL_GBUFFER)
 // https://advances.realtimerendering.com/s2010/Kaplanyan-CryEngine3(SIGGRAPH%202010%20Advanced%20RealTime%20Rendering%20Course).pdf
 vec3 encode24(vec3 v) {
 	// Unsigned normal (handles most symmetry)

@@ -3024,6 +3024,99 @@ void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform
 	RD::get_singleton()->draw_command_end_label();
 }
 
+bool RenderForwardClustered::is_texel_splatting_enabled() const {
+	return texel_splatting_enabled && texel_splat_pipeline != nullptr && texel_splat_pipeline->is_initialized();
+}
+
+uint32_t RenderForwardClustered::get_texel_splatting_probe_count() const {
+	if (!is_texel_splatting_enabled()) {
+		return 0;
+	}
+
+	return texel_splat_pipeline->get_probe_count();
+}
+
+void RenderForwardClustered::render_texel_splat_probe_gbuffer(const RendererSceneRender::CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) {
+	ERR_FAIL_NULL(p_camera_data);
+	ERR_FAIL_COND(!is_texel_splatting_enabled());
+	ERR_FAIL_COND_MSG(p_camera_data->view_count != 1, "Texel splatting probe G-buffer capture does not support multiview cameras.");
+	ERR_FAIL_UNSIGNED_INDEX(p_probe_layer, texel_splat_pipeline->get_probe_layer_count());
+
+	RID framebuffer = texel_splat_pipeline->get_probe_layer_framebuffer(p_probe_layer);
+	ERR_FAIL_COND(framebuffer.is_null());
+
+	RENDER_TIMESTAMP("Setup Texel Probe G-buffer");
+	RD::get_singleton()->draw_command_begin_label("Render Texel Probe G-buffer");
+
+	scene_state.used_uniform_buffer_count = 0;
+
+	RenderSceneDataRD scene_data;
+	scene_data.cam_projection = p_camera_data->main_projection;
+	scene_data.cam_transform = p_camera_data->main_transform;
+	scene_data.cam_orthogonal = p_camera_data->is_orthogonal;
+	scene_data.camera_visible_layers = p_camera_data->visible_layers;
+	scene_data.taa_jitter = p_camera_data->taa_jitter;
+	scene_data.taa_frame_count = p_camera_data->taa_frame_count;
+	scene_data.main_cam_transform = p_camera_data->main_transform;
+	scene_data.view_count = 1;
+	scene_data.view_eye_offset[0] = p_camera_data->view_offset[0].origin;
+	scene_data.view_projection[0] = p_camera_data->view_projection[0];
+	scene_data.prev_cam_transform = p_camera_data->main_transform;
+	scene_data.prev_cam_projection = p_camera_data->main_projection;
+	scene_data.prev_view_projection[0] = p_camera_data->view_projection[0];
+	scene_data.z_near = p_camera_data->main_projection.get_z_near();
+	scene_data.z_far = p_camera_data->main_projection.get_z_far();
+	scene_data.lod_distance_multiplier = p_camera_data->main_projection.get_lod_multiplier();
+	scene_data.screen_mesh_lod_threshold = p_screen_mesh_lod_threshold;
+	scene_data.emissive_exposure_normalization = 1.0;
+	scene_data.time = time;
+	scene_data.time_step = time_step;
+
+	PagedArray<RID> empty_rids;
+
+	RenderDataRD render_data;
+	render_data.scene_data = &scene_data;
+	render_data.cluster_size = 1;
+	render_data.cluster_max_elements = 32;
+	render_data.instances = &p_instances;
+	render_data.lights = &empty_rids;
+	render_data.reflection_probes = &empty_rids;
+	render_data.voxel_gi_instances = &empty_rids;
+	render_data.decals = &empty_rids;
+	render_data.lightmaps = &empty_rids;
+	render_data.fog_volumes = &empty_rids;
+	render_data.environment = p_environment;
+	render_data.camera_attributes = p_camera_attributes;
+
+	const Size2i screen_size(texel_splat_pipeline->get_probe_size(), texel_splat_pipeline->get_probe_size());
+	_setup_lightmaps(&render_data, *render_data.lightmaps, scene_data.cam_transform);
+	_setup_voxelgis(*render_data.voxel_gi_instances);
+
+	scene_shader.enable_advanced_shader_group();
+	_update_render_base_uniform_set();
+
+	uint32_t uniform_buffer_index = _setup_environment(&render_data, true, screen_size, screen_size, Color());
+
+	PassMode pass_mode = PASS_MODE_TEXEL_GBUFFER;
+	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode);
+	render_list[RENDER_LIST_SECONDARY].sort_by_key();
+	_fill_instance_data(RENDER_LIST_SECONDARY);
+
+	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, &render_data, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), uniform_buffer_index);
+
+	Vector<Color> clear;
+	clear.push_back(Color(0, 0, 0, 0)); // Albedo + alpha.
+	clear.push_back(Color(0, 0, 0, 0)); // Encoded normal.
+	clear.push_back(Color(0, 0, 0, 0)); // Radial depth.
+	clear.push_back(Color(0, 0, 0, 0)); // Object id.
+
+	RENDER_TIMESTAMP("Render Texel Probe G-buffer");
+	RenderListParameters render_list_params(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].element_info.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), true, pass_mode, 0, true, false, rp_uniform_set, false, Vector2(), scene_data.lod_distance_multiplier, scene_data.screen_mesh_lod_threshold);
+	_render_list_with_draw_list(&render_list_params, framebuffer, RD::DRAW_CLEAR_ALL, clear);
+
+	RD::get_singleton()->draw_command_end_label();
+}
+
 void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) {
 	RENDER_TIMESTAMP("Setup Rendering UV2");
 

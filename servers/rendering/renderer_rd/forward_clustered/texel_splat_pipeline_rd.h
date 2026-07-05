@@ -83,6 +83,8 @@ public:
 	void free();
 	bool is_initialized() const { return initialized; }
 	uint32_t get_probe_size() const { return PROBE_SIZE; }
+	uint32_t get_probe_count() const { return PROBE_COUNT; }
+	uint32_t get_probe_face_count() const { return PROBE_FACE_COUNT; }
 	uint32_t get_probe_layer_count() const { return PROBE_LAYER_COUNT; }
 	RID get_probe_layer_framebuffer(uint32_t p_layer) const;
 	RD::FramebufferFormatID get_probe_framebuffer_format() const;

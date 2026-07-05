@@ -818,6 +818,10 @@ public:
 	ClusterBuilderSharedDataRD *get_cluster_builder_shared() { return &cluster_builder_shared; }
 	RendererRD::SSEffects *get_ss_effects() { return ss_effects; }
 
+	virtual bool is_texel_splatting_enabled() const override;
+	virtual uint32_t get_texel_splatting_probe_count() const override;
+	virtual void render_texel_splat_probe_gbuffer(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) override;
+
 	/* callback from updating our lighting UBOs, used to populate cluster builder */
 	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) override;
 	virtual void setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size) override;
