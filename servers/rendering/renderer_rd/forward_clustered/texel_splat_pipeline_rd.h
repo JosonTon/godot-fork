@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_process.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
 
 namespace RendererSceneRenderImplementation {
@@ -65,27 +66,65 @@ class TexelSplatPipelineRD {
 		RID framebuffer;
 	};
 
+	struct ProcessPushConstant {
+		uint32_t probe_size = 0;
+		uint32_t layer_count = 0;
+		uint32_t max_visible_refs = 0;
+		uint32_t pad = 0;
+	};
+
+	struct CounterData {
+		uint32_t visible_count = 0;
+		uint32_t classified_count = 0;
+		uint32_t edge_count = 0;
+		uint32_t pad = 0;
+	};
+
+	struct DrawIndirectArgs {
+		uint32_t vertex_count = 6;
+		uint32_t instance_count = 0;
+		uint32_t first_vertex = 0;
+		uint32_t first_instance = 0;
+	};
+
 	ProbeTextureData probe_textures[PROBE_TEXTURE_MAX];
 	ProbeLayerData probe_layers[PROBE_LAYER_COUNT];
+	TexelSplatProcessShaderRD process_shader;
+	RID process_shader_version;
+	RID process_shader_rd;
+	RID process_pipeline;
+	RID process_uniform_set;
+	RID visible_refs_buffer;
+	RID splat_flags_buffer;
+	RID counter_buffer;
+	RID draw_args_buffer;
+	uint32_t texel_capacity = 0;
 	bool initialized = false;
 
 	bool _create_probe_textures();
 	bool _create_probe_framebuffers();
+	bool _create_process_resources();
 	bool _is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RD::DataFormat _select_depth_format(uint32_t p_usage_bits) const;
 	RID _create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RID _create_probe_texture_slice(RID p_texture, uint32_t p_layer, const char *p_label) const;
 	void _free_probe_textures();
 	void _free_probe_framebuffers();
+	void _free_process_resources();
 
 public:
 	bool initialize();
 	void free();
+	void process_probe_data();
 	bool is_initialized() const { return initialized; }
 	uint32_t get_probe_size() const { return PROBE_SIZE; }
 	uint32_t get_probe_count() const { return PROBE_COUNT; }
 	uint32_t get_probe_face_count() const { return PROBE_FACE_COUNT; }
 	uint32_t get_probe_layer_count() const { return PROBE_LAYER_COUNT; }
+	uint32_t get_texel_capacity() const { return texel_capacity; }
+	RID get_visible_refs_buffer() const { return visible_refs_buffer; }
+	RID get_splat_flags_buffer() const { return splat_flags_buffer; }
+	RID get_draw_args_buffer() const { return draw_args_buffer; }
 	RID get_probe_layer_framebuffer(uint32_t p_layer) const;
 	RD::FramebufferFormatID get_probe_framebuffer_format() const;
 

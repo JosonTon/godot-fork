@@ -3780,6 +3780,9 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 			_render_scene(&camera_data, p_render_buffers, p_environment, p_force_camera_attributes, RID(), p_visible_layers, p_scenario, RID(), p_shadow_atlas, RID(), 0, p_screen_mesh_lod_threshold, p_window_output_max_value, false, nullptr, int(layer));
 		}
 	}
+
+	RENDER_TIMESTAMP("Process Texel Probe Data");
+	scene_render->process_texel_splat_probe_data();
 }
 
 RID RendererSceneCull::_render_get_environment(RID p_camera, RID p_scenario) {

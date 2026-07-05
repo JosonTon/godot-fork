@@ -327,6 +327,7 @@ public:
 	virtual bool is_texel_splatting_enabled() const { return false; }
 	virtual uint32_t get_texel_splatting_probe_count() const { return 0; }
 	virtual void render_texel_splat_probe_gbuffer(const CameraData *, const PagedArray<RenderGeometryInstance *> &, RID, RID, uint32_t, float) {}
+	virtual void process_texel_splat_probe_data() {}
 
 	virtual void render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) = 0;
 	virtual void render_particle_collider_heightfield(RID p_collider, const Transform3D &p_transform, const PagedArray<RenderGeometryInstance *> &p_instances) = 0;

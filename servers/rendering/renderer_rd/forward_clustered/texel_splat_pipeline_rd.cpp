@@ -31,6 +31,7 @@
 #include "texel_splat_pipeline_rd.h"
 
 #include "core/error/error_macros.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 
 namespace RendererSceneRenderImplementation {
 
@@ -55,14 +56,51 @@ bool TexelSplatPipelineRD::initialize() {
 		return false;
 	}
 
+	if (!_create_process_resources()) {
+		free();
+		return false;
+	}
+
 	initialized = true;
 	return true;
 }
 
 void TexelSplatPipelineRD::free() {
+	_free_process_resources();
 	_free_probe_framebuffers();
 	_free_probe_textures();
 	initialized = false;
+}
+
+void TexelSplatPipelineRD::process_probe_data() {
+	ERR_FAIL_COND(!initialized);
+	ERR_FAIL_COND(process_pipeline.is_null());
+	ERR_FAIL_COND(process_uniform_set.is_null());
+
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+
+	CounterData counters;
+	DrawIndirectArgs draw_args;
+	ERR_FAIL_COND(rd->buffer_update(counter_buffer, 0, sizeof(CounterData), &counters) != OK);
+	ERR_FAIL_COND(rd->buffer_update(draw_args_buffer, 0, sizeof(DrawIndirectArgs), &draw_args) != OK);
+
+	rd->draw_command_begin_label("Texel Splat Process");
+
+	ProcessPushConstant push_constant;
+	push_constant.probe_size = PROBE_SIZE;
+	push_constant.layer_count = PROBE_LAYER_COUNT;
+	push_constant.max_visible_refs = texel_capacity;
+
+	RD::ComputeListID compute_list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(compute_list, process_pipeline);
+	rd->compute_list_bind_uniform_set(compute_list, process_uniform_set, 0);
+	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(ProcessPushConstant));
+	rd->compute_list_dispatch_threads(compute_list, PROBE_SIZE, PROBE_SIZE, PROBE_LAYER_COUNT);
+	rd->compute_list_add_barrier(compute_list);
+	rd->compute_list_end();
+
+	rd->draw_command_end_label();
 }
 
 RID TexelSplatPipelineRD::get_probe_layer_framebuffer(uint32_t p_layer) const {
@@ -136,6 +174,65 @@ bool TexelSplatPipelineRD::_create_probe_framebuffers() {
 		probe_layer.framebuffer = RD::get_singleton()->framebuffer_create(attachments);
 		ERR_FAIL_COND_V_MSG(probe_layer.framebuffer.is_null(), false, "Failed to create texel splatting probe layer framebuffer.");
 	}
+
+	return true;
+}
+
+bool TexelSplatPipelineRD::_create_process_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+
+	texel_capacity = PROBE_SIZE * PROBE_SIZE * PROBE_LAYER_COUNT;
+	const uint32_t texel_buffer_size = sizeof(uint32_t) * texel_capacity;
+
+	visible_refs_buffer = rd->storage_buffer_create(texel_buffer_size);
+	ERR_FAIL_COND_V_MSG(visible_refs_buffer.is_null(), false, "Failed to create texel splatting visible refs buffer.");
+
+	splat_flags_buffer = rd->storage_buffer_create(texel_buffer_size);
+	ERR_FAIL_COND_V_MSG(splat_flags_buffer.is_null(), false, "Failed to create texel splatting flags buffer.");
+
+	CounterData counters;
+	Vector<uint8_t> counter_data;
+	counter_data.resize(sizeof(CounterData));
+	memcpy(counter_data.ptrw(), &counters, sizeof(CounterData));
+	counter_buffer = rd->storage_buffer_create(sizeof(CounterData), counter_data);
+	ERR_FAIL_COND_V_MSG(counter_buffer.is_null(), false, "Failed to create texel splatting counter buffer.");
+
+	DrawIndirectArgs draw_args;
+	Vector<uint8_t> draw_args_data;
+	draw_args_data.resize(sizeof(DrawIndirectArgs));
+	memcpy(draw_args_data.ptrw(), &draw_args, sizeof(DrawIndirectArgs));
+	draw_args_buffer = rd->storage_buffer_create(sizeof(DrawIndirectArgs), draw_args_data, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	ERR_FAIL_COND_V_MSG(draw_args_buffer.is_null(), false, "Failed to create texel splatting draw args buffer.");
+
+	Vector<String> process_modes;
+	process_modes.push_back("");
+	process_shader.initialize(process_modes);
+	process_shader_version = process_shader.version_create();
+	process_shader_rd = process_shader.version_get_shader(process_shader_version, 0);
+	ERR_FAIL_COND_V_MSG(process_shader_rd.is_null(), false, "Failed to create texel splatting process shader.");
+
+	process_pipeline = rd->compute_pipeline_create(process_shader_rd);
+	ERR_FAIL_COND_V_MSG(process_pipeline.is_null(), false, "Failed to create texel splatting process pipeline.");
+
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	ERR_FAIL_NULL_V(material_storage, false);
+
+	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	ERR_FAIL_COND_V(nearest_sampler.is_null(), false);
+
+	Vector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_ALBEDO].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_NORMAL].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_RADIAL].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_OBJECT_ID].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, visible_refs_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, splat_flags_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, counter_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, draw_args_buffer));
+
+	process_uniform_set = rd->uniform_set_create(uniforms, process_shader_rd, 0);
+	ERR_FAIL_COND_V_MSG(process_uniform_set.is_null(), false, "Failed to create texel splatting process uniform set.");
 
 	return true;
 }
@@ -218,6 +315,45 @@ void TexelSplatPipelineRD::_free_probe_framebuffers() {
 			probe_layer.depth_view = RID();
 		}
 	}
+}
+
+void TexelSplatPipelineRD::_free_process_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+
+	if (process_uniform_set.is_valid() && rd->uniform_set_is_valid(process_uniform_set)) {
+		rd->free_rid(process_uniform_set);
+	}
+	process_uniform_set = RID();
+
+	if (process_pipeline.is_valid()) {
+		rd->free_rid(process_pipeline);
+		process_pipeline = RID();
+	}
+
+	if (visible_refs_buffer.is_valid()) {
+		rd->free_rid(visible_refs_buffer);
+		visible_refs_buffer = RID();
+	}
+	if (splat_flags_buffer.is_valid()) {
+		rd->free_rid(splat_flags_buffer);
+		splat_flags_buffer = RID();
+	}
+	if (counter_buffer.is_valid()) {
+		rd->free_rid(counter_buffer);
+		counter_buffer = RID();
+	}
+	if (draw_args_buffer.is_valid()) {
+		rd->free_rid(draw_args_buffer);
+		draw_args_buffer = RID();
+	}
+
+	if (process_shader_version.is_valid()) {
+		process_shader.version_free(process_shader_version);
+		process_shader_version = RID();
+	}
+	process_shader_rd = RID();
+	texel_capacity = 0;
 }
 
 } // namespace RendererSceneRenderImplementation

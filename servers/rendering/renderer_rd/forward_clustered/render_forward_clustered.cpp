@@ -3118,6 +3118,13 @@ void RenderForwardClustered::render_texel_splat_probe_gbuffer(const RendererScen
 	RD::get_singleton()->draw_command_end_label();
 }
 
+void RenderForwardClustered::process_texel_splat_probe_data() {
+	ERR_FAIL_COND(!is_texel_splatting_enabled());
+	ERR_FAIL_NULL(texel_splat_pipeline);
+
+	texel_splat_pipeline->process_probe_data();
+}
+
 void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) {
 	RENDER_TIMESTAMP("Setup Rendering UV2");
 
