@@ -57,6 +57,8 @@
 
 namespace RendererSceneRenderImplementation {
 
+class TexelSplatPipelineRD;
+
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
 
@@ -86,6 +88,8 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	/* Scene Shader */
 
 	SceneShaderForwardClustered scene_shader;
+	bool texel_splatting_enabled = false;
+	TexelSplatPipelineRD *texel_splat_pipeline = nullptr;
 
 public:
 	/* Framebuffer */

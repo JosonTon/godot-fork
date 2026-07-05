@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
+#include "servers/rendering/renderer_rd/forward_clustered/texel_splat_pipeline_rd.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -5102,6 +5103,12 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
+	texel_splatting_enabled = GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/enabled");
+
+	if (texel_splatting_enabled) {
+		texel_splat_pipeline = memnew(TexelSplatPipelineRD);
+		texel_splat_pipeline->initialize();
+	}
 
 	/* SCENE SHADER */
 
@@ -5246,6 +5253,11 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	if (texel_splat_pipeline != nullptr) {
+		memdelete(texel_splat_pipeline);
+		texel_splat_pipeline = nullptr;
+	}
+
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;
