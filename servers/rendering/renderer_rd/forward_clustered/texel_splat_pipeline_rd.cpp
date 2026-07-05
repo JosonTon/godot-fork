@@ -61,11 +61,17 @@ bool TexelSplatPipelineRD::initialize() {
 		return false;
 	}
 
+	if (!_create_draw_resources()) {
+		free();
+		return false;
+	}
+
 	initialized = true;
 	return true;
 }
 
 void TexelSplatPipelineRD::free() {
+	_free_draw_resources();
 	_free_process_resources();
 	_free_probe_framebuffers();
 	_free_probe_textures();
@@ -99,6 +105,40 @@ void TexelSplatPipelineRD::process_probe_data() {
 	rd->compute_list_dispatch_threads(compute_list, PROBE_SIZE, PROBE_SIZE, PROBE_LAYER_COUNT);
 	rd->compute_list_add_barrier(compute_list);
 	rd->compute_list_end();
+
+	rd->draw_command_end_label();
+}
+
+void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size) {
+	ERR_FAIL_COND(!initialized);
+	ERR_FAIL_COND(p_framebuffer.is_null());
+	ERR_FAIL_COND(draw_uniform_set.is_null());
+	ERR_FAIL_COND(draw_args_buffer.is_null());
+	ERR_FAIL_COND(p_probe_transforms.size() != PROBE_LAYER_COUNT);
+
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+
+	DrawState draw_state;
+	RendererRD::MaterialStorage::store_camera(p_view_projection, draw_state.view_projection);
+	for (uint32_t i = 0; i < PROBE_LAYER_COUNT; i++) {
+		RendererRD::MaterialStorage::store_transform(p_probe_transforms[i], draw_state.probe_transforms[i]);
+	}
+	draw_state.params[0] = float(PROBE_SIZE);
+	draw_state.params[1] = 2.0f;
+	draw_state.params[2] = float(p_viewport_size.x);
+	draw_state.params[3] = float(p_viewport_size.y);
+
+	ERR_FAIL_COND(rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &draw_state) != OK);
+
+	rd->draw_command_begin_label("Draw Texel Splats");
+
+	RD::DrawListID draw_list = rd->draw_list_begin(p_framebuffer);
+	RID pipeline = draw_pipeline.get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(p_framebuffer));
+	rd->draw_list_bind_render_pipeline(draw_list, pipeline);
+	rd->draw_list_bind_uniform_set(draw_list, draw_uniform_set, 0);
+	rd->draw_list_draw_indirect(draw_list, false, draw_args_buffer);
+	rd->draw_list_end();
 
 	rd->draw_command_end_label();
 }
@@ -237,6 +277,55 @@ bool TexelSplatPipelineRD::_create_process_resources() {
 	return true;
 }
 
+bool TexelSplatPipelineRD::_create_draw_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+
+	DrawState draw_state;
+	Vector<uint8_t> draw_state_data;
+	draw_state_data.resize(sizeof(DrawState));
+	memcpy(draw_state_data.ptrw(), &draw_state, sizeof(DrawState));
+	draw_state_buffer = rd->storage_buffer_create(sizeof(DrawState), draw_state_data);
+	ERR_FAIL_COND_V_MSG(draw_state_buffer.is_null(), false, "Failed to create texel splatting draw state buffer.");
+
+	Vector<String> draw_modes;
+	draw_modes.push_back("");
+	draw_shader.initialize(draw_modes);
+	draw_shader_version = draw_shader.version_create();
+	draw_shader_rd = draw_shader.version_get_shader(draw_shader_version, 0);
+	ERR_FAIL_COND_V_MSG(draw_shader_rd.is_null(), false, "Failed to create texel splatting draw shader.");
+
+	RD::PipelineRasterizationState rasterization_state;
+	rasterization_state.cull_mode = RD::POLYGON_CULL_DISABLED;
+
+	draw_pipeline.setup(
+			draw_shader_rd,
+			RD::RENDER_PRIMITIVE_TRIANGLES,
+			rasterization_state,
+			RD::PipelineMultisampleState(),
+			RD::PipelineDepthStencilState(),
+			RD::PipelineColorBlendState::create_blend(),
+			0);
+
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	ERR_FAIL_NULL_V(material_storage, false);
+
+	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	ERR_FAIL_COND_V(nearest_sampler.is_null(), false);
+
+	Vector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_ALBEDO].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_RADIAL].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, visible_refs_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, splat_flags_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, draw_state_buffer));
+
+	draw_uniform_set = rd->uniform_set_create(uniforms, draw_shader_rd, 0);
+	ERR_FAIL_COND_V_MSG(draw_uniform_set.is_null(), false, "Failed to create texel splatting draw uniform set.");
+
+	return true;
+}
+
 bool TexelSplatPipelineRD::_is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const {
 	const bool supported = RD::get_singleton()->texture_is_format_supported_for_usage(p_format, p_usage_bits);
 	ERR_FAIL_COND_V_MSG(!supported, false, "Texel splatting probe texture '" + String(p_label) + "' requires unsupported RD texture usage bits.");
@@ -354,6 +443,29 @@ void TexelSplatPipelineRD::_free_process_resources() {
 	}
 	process_shader_rd = RID();
 	texel_capacity = 0;
+}
+
+void TexelSplatPipelineRD::_free_draw_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+
+	if (draw_uniform_set.is_valid() && rd->uniform_set_is_valid(draw_uniform_set)) {
+		rd->free_rid(draw_uniform_set);
+	}
+	draw_uniform_set = RID();
+
+	draw_pipeline.clear();
+
+	if (draw_state_buffer.is_valid()) {
+		rd->free_rid(draw_state_buffer);
+		draw_state_buffer = RID();
+	}
+
+	if (draw_shader_version.is_valid()) {
+		draw_shader.version_free(draw_shader_version);
+		draw_shader_version = RID();
+	}
+	draw_shader_rd = RID();
 }
 
 } // namespace RendererSceneRenderImplementation

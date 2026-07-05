@@ -3760,6 +3760,8 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 	const Vector3 forward = -p_camera_data->main_transform.basis.get_column(Vector3::AXIS_Z).normalized();
 	const float probe_spacing = MIN(max_distance * 0.25f, 16.0f);
 	const uint32_t face_count = 6;
+	Vector<Transform3D> probe_face_transforms;
+	probe_face_transforms.resize(probe_count * face_count);
 
 	for (uint32_t probe = 0; probe < probe_count; probe++) {
 		Transform3D probe_transform;
@@ -3772,10 +3774,13 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 			Transform3D local_view;
 			local_view.set_look_at(Vector3(), view_normals[face], view_up[face]);
 
-			RendererSceneRender::CameraData camera_data;
-			camera_data.set_camera(probe_transform * local_view, cm, false, false, Vector2(), 0.0f, p_camera_data->visible_layers);
-
 			const uint32_t layer = probe * face_count + face;
+			Transform3D probe_face_transform = probe_transform * local_view;
+			probe_face_transforms.write[layer] = probe_face_transform;
+
+			RendererSceneRender::CameraData camera_data;
+			camera_data.set_camera(probe_face_transform, cm, false, false, Vector2(), 0.0f, p_camera_data->visible_layers);
+
 			RENDER_TIMESTAMP("Render Texel Probe " + itos(probe) + ", Face " + itos(face));
 			_render_scene(&camera_data, p_render_buffers, p_environment, p_force_camera_attributes, RID(), p_visible_layers, p_scenario, RID(), p_shadow_atlas, RID(), 0, p_screen_mesh_lod_threshold, p_window_output_max_value, false, nullptr, int(layer));
 		}
@@ -3783,6 +3788,7 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 
 	RENDER_TIMESTAMP("Process Texel Probe Data");
 	scene_render->process_texel_splat_probe_data();
+	scene_render->draw_texel_splats(p_render_buffers, p_camera_data, probe_face_transforms);
 }
 
 RID RendererSceneCull::_render_get_environment(RID p_camera, RID p_scenario) {

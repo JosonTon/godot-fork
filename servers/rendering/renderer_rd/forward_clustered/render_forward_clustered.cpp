@@ -3125,6 +3125,29 @@ void RenderForwardClustered::process_texel_splat_probe_data() {
 	texel_splat_pipeline->process_probe_data();
 }
 
+void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) {
+	ERR_FAIL_COND(!is_texel_splatting_enabled());
+	ERR_FAIL_NULL(texel_splat_pipeline);
+	ERR_FAIL_NULL(p_camera_data);
+
+	if (p_camera_data->view_count != 1) {
+		return;
+	}
+
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	ERR_FAIL_COND(!rb->has_internal_texture());
+
+	RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture());
+	ERR_FAIL_COND(framebuffer.is_null());
+
+	Projection depth_correction;
+	depth_correction.set_depth_correction(true);
+	Projection view_projection = (depth_correction * p_camera_data->main_projection) * Projection(p_camera_data->main_transform.affine_inverse());
+
+	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, rb->get_internal_size());
+}
+
 void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) {
 	RENDER_TIMESTAMP("Setup Rendering UV2");
 

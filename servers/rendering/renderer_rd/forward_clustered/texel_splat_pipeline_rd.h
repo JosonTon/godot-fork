@@ -30,6 +30,11 @@
 
 #pragma once
 
+#include "core/math/projection.h"
+#include "core/math/transform_3d.h"
+#include "core/templates/vector.h"
+#include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
+#include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_draw.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_process.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
 
@@ -87,23 +92,36 @@ class TexelSplatPipelineRD {
 		uint32_t first_instance = 0;
 	};
 
+	struct DrawState {
+		float view_projection[16] = {};
+		float probe_transforms[PROBE_LAYER_COUNT][16] = {};
+		float params[4] = {};
+	};
+
 	ProbeTextureData probe_textures[PROBE_TEXTURE_MAX];
 	ProbeLayerData probe_layers[PROBE_LAYER_COUNT];
 	TexelSplatProcessShaderRD process_shader;
+	TexelSplatDrawShaderRD draw_shader;
 	RID process_shader_version;
+	RID draw_shader_version;
 	RID process_shader_rd;
+	RID draw_shader_rd;
 	RID process_pipeline;
+	PipelineCacheRD draw_pipeline;
 	RID process_uniform_set;
+	RID draw_uniform_set;
 	RID visible_refs_buffer;
 	RID splat_flags_buffer;
 	RID counter_buffer;
 	RID draw_args_buffer;
+	RID draw_state_buffer;
 	uint32_t texel_capacity = 0;
 	bool initialized = false;
 
 	bool _create_probe_textures();
 	bool _create_probe_framebuffers();
 	bool _create_process_resources();
+	bool _create_draw_resources();
 	bool _is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RD::DataFormat _select_depth_format(uint32_t p_usage_bits) const;
 	RID _create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
@@ -111,11 +129,13 @@ class TexelSplatPipelineRD {
 	void _free_probe_textures();
 	void _free_probe_framebuffers();
 	void _free_process_resources();
+	void _free_draw_resources();
 
 public:
 	bool initialize();
 	void free();
 	void process_probe_data();
+	void draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size);
 	bool is_initialized() const { return initialized; }
 	uint32_t get_probe_size() const { return PROBE_SIZE; }
 	uint32_t get_probe_count() const { return PROBE_COUNT; }
