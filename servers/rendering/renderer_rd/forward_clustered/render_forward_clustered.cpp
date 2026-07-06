@@ -3139,6 +3139,7 @@ void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_
 	ERR_FAIL_COND(!rb->has_internal_texture());
 
 	RID framebuffer;
+	Size2i draw_size = rb->get_internal_size();
 	if (texel_splat_pipeline->is_draw_depth_test_enabled()) {
 		if (!rb->has_depth_texture()) {
 			WARN_PRINT_ONCE("Texel splatting depth test requested, but the render buffer has no depth texture. Skipping texel splat draw.");
@@ -3146,7 +3147,14 @@ void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_
 		}
 		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture(), rb->get_depth_texture());
 	} else {
-		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture());
+		RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+		if (texture_storage != nullptr && rb->get_render_target().is_valid()) {
+			framebuffer = texture_storage->render_target_get_rd_framebuffer(rb->get_render_target());
+			draw_size = rb->get_target_size();
+		}
+		if (framebuffer.is_null()) {
+			framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture());
+		}
 	}
 	ERR_FAIL_COND(framebuffer.is_null());
 
@@ -3154,7 +3162,7 @@ void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_
 	depth_correction.set_depth_correction(true);
 	Projection view_projection = (depth_correction * p_camera_data->main_projection) * Projection(p_camera_data->main_transform.affine_inverse());
 
-	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, rb->get_internal_size());
+	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, draw_size);
 }
 
 void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) {
