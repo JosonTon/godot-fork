@@ -127,7 +127,7 @@ class TexelSplatPipelineRD {
 	RID draw_args_buffer;
 	RID draw_state_buffer;
 	uint32_t texel_capacity = 0;
-	float splat_size_pixels = 2.0f;
+	float splat_expansion_texels = 0.5f;
 	uint32_t debug_view = DEBUG_VIEW_ALBEDO;
 	int32_t debug_probe_layer = -1;
 	bool debug_log_counters = false;

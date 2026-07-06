@@ -65,15 +65,16 @@ void main() {
 	uint object_id = texelFetch(probe_object_id, probe_coord, 0).r;
 
 	vec2 uv = (vec2(x, y) + vec2(0.5)) / float(probe_size);
-	vec2 face_xy = uv * 2.0 - 1.0;
-	vec3 probe_view_pos = vec3(face_xy.x * radial_depth, -face_xy.y * radial_depth, -radial_depth);
+	float half_texel = 0.5 / float(probe_size);
+	float expansion = max(draw_state.params.y, 0.0) / float(probe_size);
+	float half_splat = half_texel + expansion;
+	vec2 corner_uv = uv + QUAD[gl_VertexIndex] * 2.0 * half_splat;
+	vec2 corner_face_xy = corner_uv * 2.0 - 1.0;
+	vec3 raw_dir = vec3(corner_face_xy.x, -corner_face_xy.y, -1.0);
+	float max_comp = max(abs(raw_dir.x), max(abs(raw_dir.y), abs(raw_dir.z)));
+	vec3 probe_view_pos = raw_dir * (radial_depth / max(max_comp, 0.00001));
 	vec4 world_pos = draw_state.probe_transforms[layer] * vec4(probe_view_pos, 1.0);
-	vec4 clip_pos = draw_state.view_projection * world_pos;
-
-	vec2 viewport_size = max(draw_state.params.zw, vec2(1.0));
-	vec2 ndc_pixel = QUAD[gl_VertexIndex] * draw_state.params.y * 2.0 / viewport_size;
-	clip_pos.xy += ndc_pixel * clip_pos.w;
-	gl_Position = clip_pos;
+	gl_Position = draw_state.view_projection * world_pos;
 
 	uint flags = splat_flags.data[texel_ref];
 	int selected_layer = int(round(draw_state.debug_params.y));

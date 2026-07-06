@@ -131,7 +131,7 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 		RendererRD::MaterialStorage::store_transform(p_probe_transforms[i], draw_state.probe_transforms[i]);
 	}
 	draw_state.params[0] = float(PROBE_SIZE);
-	draw_state.params[1] = splat_size_pixels;
+	draw_state.params[1] = splat_expansion_texels;
 	draw_state.params[2] = float(p_viewport_size.x);
 	draw_state.params[3] = float(p_viewport_size.y);
 	draw_state.debug_params[0] = float(debug_view);
@@ -154,7 +154,7 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 }
 
 void TexelSplatPipelineRD::_load_project_settings() {
-	splat_size_pixels = MAX(0.25f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/splat_size_pixels")));
+	splat_expansion_texels = MAX(0.0f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/splat_expansion_texels")));
 	debug_view = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/view")), 0, int32_t(DEBUG_VIEW_MAX - 1)));
 	debug_probe_layer = CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/probe_layer")), -1, int32_t(PROBE_LAYER_COUNT - 1));
 	debug_log_counters = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters"));
