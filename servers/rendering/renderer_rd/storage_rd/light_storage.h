@@ -834,6 +834,17 @@ public:
 	RID get_area_light_buffer() { return area_light_buffer; }
 	RID get_directional_light_buffer() { return directional_light_buffer; }
 	uint32_t get_max_directional_lights() { return max_directional_lights; }
+	bool get_directional_light_texel_splat_data(uint32_t p_light_index, Vector3 &r_direction, Color &r_color, float &r_energy) const {
+		if (directional_lights == nullptr || p_light_index >= max_directional_lights) {
+			return false;
+		}
+
+		const DirectionalLightData &light = directional_lights[p_light_index];
+		r_direction = Vector3(light.direction[0], light.direction[1], light.direction[2]);
+		r_color = Color(light.color[0], light.color[1], light.color[2], 1.0);
+		r_energy = light.energy;
+		return true;
+	}
 	uint32_t get_directional_light_blend_splits(uint32_t p_directional_light_count) const {
 		uint32_t blend_splits = 0;
 		for (uint32_t i = 0; i < p_directional_light_count; i++) {

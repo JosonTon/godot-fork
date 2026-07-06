@@ -91,6 +91,11 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	bool texel_splatting_enabled = false;
 	TexelSplatPipelineRD *texel_splat_pipeline = nullptr;
 	uint32_t next_texel_object_id = 1;
+	struct TexelSplatDirectionalLightCache {
+		bool enabled = false;
+		Vector3 direction = Vector3(0.0, 0.0, 1.0);
+		Color color = Color(1.0, 1.0, 1.0, 1.0);
+	} texel_splat_directional_light;
 
 public:
 	/* Framebuffer */

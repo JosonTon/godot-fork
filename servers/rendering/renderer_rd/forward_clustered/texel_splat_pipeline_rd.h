@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/math/color.h"
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/templates/vector.h"
@@ -97,6 +98,8 @@ class TexelSplatPipelineRD {
 		float probe_transforms[PROBE_LAYER_COUNT][16] = {};
 		float params[4] = {};
 		float debug_params[4] = {};
+		float directional_light_direction[4] = {};
+		float directional_light_color[4] = {};
 	};
 
 	enum DebugView {
@@ -156,7 +159,7 @@ public:
 	bool initialize();
 	void free();
 	void process_probe_data();
-	void draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size);
+	void draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled);
 	bool is_initialized() const { return initialized; }
 	uint32_t get_probe_size() const { return PROBE_SIZE; }
 	uint32_t get_probe_count() const { return PROBE_COUNT; }

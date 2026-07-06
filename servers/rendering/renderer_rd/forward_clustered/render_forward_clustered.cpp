@@ -1678,6 +1678,18 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
 	p_render_data->directional_light_count = directional_light_count;
+	texel_splat_directional_light.enabled = false;
+	if (!p_render_data->reflection_probe.is_valid() && directional_light_count > 0) {
+		Vector3 view_direction;
+		Color light_color;
+		float light_energy = 0.0f;
+		if (light_storage->get_directional_light_texel_splat_data(0, view_direction, light_color, light_energy)) {
+			texel_splat_directional_light.enabled = true;
+			texel_splat_directional_light.direction = p_render_data->scene_data->cam_transform.basis.xform(view_direction).normalized();
+			texel_splat_directional_light.color = light_color * light_energy;
+			texel_splat_directional_light.color.a = 1.0;
+		}
+	}
 
 	if (current_cluster_builder) {
 		current_cluster_builder->bake_cluster();
@@ -3168,7 +3180,7 @@ void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_
 	depth_correction.set_depth_correction(true);
 	Projection view_projection = (depth_correction * p_camera_data->main_projection) * Projection(p_camera_data->main_transform.affine_inverse());
 
-	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, draw_size);
+	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, draw_size, texel_splat_directional_light.direction, texel_splat_directional_light.color, texel_splat_directional_light.enabled);
 
 	if (depth_test_copy_framebuffer.is_valid()) {
 		copy_effects->copy_to_fb_rect(rb->get_internal_texture(), depth_test_copy_framebuffer, Rect2(Vector2(), depth_test_copy_size), false, false);

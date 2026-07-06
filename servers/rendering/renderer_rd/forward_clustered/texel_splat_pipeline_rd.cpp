@@ -115,7 +115,7 @@ void TexelSplatPipelineRD::process_probe_data() {
 	rd->draw_command_end_label();
 }
 
-void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size) {
+void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled) {
 	ERR_FAIL_COND(!initialized);
 	ERR_FAIL_COND(p_framebuffer.is_null());
 	ERR_FAIL_COND(draw_uniform_set.is_null());
@@ -138,6 +138,15 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 	draw_state.debug_params[1] = float(debug_probe_layer);
 	draw_state.debug_params[2] = 0.0f;
 	draw_state.debug_params[3] = 0.0f;
+	const Vector3 light_direction = p_directional_light_direction.normalized();
+	draw_state.directional_light_direction[0] = light_direction.x;
+	draw_state.directional_light_direction[1] = light_direction.y;
+	draw_state.directional_light_direction[2] = light_direction.z;
+	draw_state.directional_light_direction[3] = p_directional_light_enabled ? 1.0f : 0.0f;
+	draw_state.directional_light_color[0] = p_directional_light_color.r;
+	draw_state.directional_light_color[1] = p_directional_light_color.g;
+	draw_state.directional_light_color[2] = p_directional_light_color.b;
+	draw_state.directional_light_color[3] = 0.15f;
 
 	ERR_FAIL_COND(rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &draw_state) != OK);
 

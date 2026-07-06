@@ -24,6 +24,8 @@ layout(set = 0, binding = 6, std430) restrict readonly buffer DrawState {
 	mat4 probe_transforms[18];
 	vec4 params;
 	vec4 debug_params;
+	vec4 directional_light_direction;
+	vec4 directional_light_color;
 }
 draw_state;
 
@@ -50,6 +52,10 @@ vec3 hash_color(uint value) {
 			float(value & 255u),
 			float((value >> 8) & 255u),
 			float((value >> 16) & 255u)) / 255.0;
+}
+
+vec3 decode_probe_normal(vec3 encoded_normal) {
+	return normalize(encoded_normal * 2.0 - 1.0);
 }
 
 void main() {
@@ -109,6 +115,14 @@ void main() {
 	} else if (debug_view == 6u) {
 		vertex_color = vec4(0.0, 0.75, 1.0, 1.0);
 		return;
+	}
+
+	if (debug_view == 0u && draw_state.directional_light_direction.w > 0.5) {
+		vec3 world_normal = decode_probe_normal(encoded_normal);
+		vec3 light_direction = normalize(draw_state.directional_light_direction.xyz);
+		float diffuse = max(dot(world_normal, light_direction), 0.0);
+		vec3 lighting = vec3(draw_state.directional_light_color.a) + draw_state.directional_light_color.rgb * diffuse;
+		color = clamp(color * lighting, vec3(0.0), vec3(1.0));
 	}
 
 	vertex_color = vec4(color, min(max(albedo.a, 0.35), 1.0));
