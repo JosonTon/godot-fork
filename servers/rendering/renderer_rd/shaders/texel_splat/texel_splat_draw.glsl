@@ -87,7 +87,11 @@ void main() {
 	bool edge = (flags & 2u) != 0u;
 	vec3 color = albedo.rgb;
 	if (debug_view == 1u) {
-		color = edge ? vec3(1.0, 0.35, 0.05) : albedo.rgb * 0.35;
+		if (!edge) {
+			vertex_color = vec4(0.0);
+			return;
+		}
+		color = vec3(1.0, 0.35, 0.05);
 	} else if (debug_view == 2u) {
 		float depth_luma = clamp(radial_depth / 32.0, 0.0, 1.0);
 		color = vec3(depth_luma);
