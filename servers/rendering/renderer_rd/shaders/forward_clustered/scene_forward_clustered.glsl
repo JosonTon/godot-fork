@@ -3030,7 +3030,8 @@ void fragment_shader(in SceneData scene_data) {
 	texel_albedo_output_buffer.rgb = albedo;
 	texel_albedo_output_buffer.a = alpha;
 
-	texel_normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
+	vec3 texel_world_normal = normalize(mat3(inv_view_matrix) * normal);
+	texel_normal_output_buffer.rgb = encode24(texel_world_normal) * 0.5 + 0.5;
 	texel_normal_output_buffer.a = 0.0;
 
 	texel_radial_depth_output_buffer = max(abs(vertex.x), max(abs(vertex.y), abs(vertex.z)));
