@@ -96,6 +96,17 @@ class TexelSplatPipelineRD {
 		float view_projection[16] = {};
 		float probe_transforms[PROBE_LAYER_COUNT][16] = {};
 		float params[4] = {};
+		float debug_params[4] = {};
+	};
+
+	enum DebugView {
+		DEBUG_VIEW_ALBEDO,
+		DEBUG_VIEW_EDGE,
+		DEBUG_VIEW_RADIAL_DEPTH,
+		DEBUG_VIEW_NORMAL,
+		DEBUG_VIEW_OBJECT_ID,
+		DEBUG_VIEW_LAYER,
+		DEBUG_VIEW_MAX
 	};
 
 	ProbeTextureData probe_textures[PROBE_TEXTURE_MAX];
@@ -116,12 +127,21 @@ class TexelSplatPipelineRD {
 	RID draw_args_buffer;
 	RID draw_state_buffer;
 	uint32_t texel_capacity = 0;
+	float splat_size_pixels = 2.0f;
+	uint32_t debug_view = DEBUG_VIEW_ALBEDO;
+	int32_t debug_probe_layer = -1;
+	bool debug_log_counters = false;
+	uint32_t debug_log_counter_interval = 60;
+	uint64_t debug_frame_index = 0;
+	bool draw_depth_test_enabled = false;
 	bool initialized = false;
 
+	void _load_project_settings();
 	bool _create_probe_textures();
 	bool _create_probe_framebuffers();
 	bool _create_process_resources();
 	bool _create_draw_resources();
+	void _debug_log_counters(RenderingDevice *p_rd);
 	bool _is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RD::DataFormat _select_depth_format(uint32_t p_usage_bits) const;
 	RID _create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
@@ -142,6 +162,7 @@ public:
 	uint32_t get_probe_face_count() const { return PROBE_FACE_COUNT; }
 	uint32_t get_probe_layer_count() const { return PROBE_LAYER_COUNT; }
 	uint32_t get_texel_capacity() const { return texel_capacity; }
+	bool is_draw_depth_test_enabled() const { return draw_depth_test_enabled; }
 	RID get_visible_refs_buffer() const { return visible_refs_buffer; }
 	RID get_splat_flags_buffer() const { return splat_flags_buffer; }
 	RID get_draw_args_buffer() const { return draw_args_buffer; }

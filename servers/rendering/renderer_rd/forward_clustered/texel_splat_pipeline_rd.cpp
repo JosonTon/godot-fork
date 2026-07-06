@@ -30,6 +30,8 @@
 
 #include "texel_splat_pipeline_rd.h"
 
+#include "core/config/project_settings.h"
+#include "core/string/print_string.h"
 #include "core/error/error_macros.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 
@@ -45,6 +47,8 @@ bool TexelSplatPipelineRD::initialize() {
 	if (initialized) {
 		return true;
 	}
+
+	_load_project_settings();
 
 	if (!_create_probe_textures()) {
 		free();
@@ -106,6 +110,8 @@ void TexelSplatPipelineRD::process_probe_data() {
 	rd->compute_list_add_barrier(compute_list);
 	rd->compute_list_end();
 
+	_debug_log_counters(rd);
+
 	rd->draw_command_end_label();
 }
 
@@ -125,9 +131,13 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 		RendererRD::MaterialStorage::store_transform(p_probe_transforms[i], draw_state.probe_transforms[i]);
 	}
 	draw_state.params[0] = float(PROBE_SIZE);
-	draw_state.params[1] = 2.0f;
+	draw_state.params[1] = splat_size_pixels;
 	draw_state.params[2] = float(p_viewport_size.x);
 	draw_state.params[3] = float(p_viewport_size.y);
+	draw_state.debug_params[0] = float(debug_view);
+	draw_state.debug_params[1] = float(debug_probe_layer);
+	draw_state.debug_params[2] = 0.0f;
+	draw_state.debug_params[3] = 0.0f;
 
 	ERR_FAIL_COND(rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &draw_state) != OK);
 
@@ -141,6 +151,42 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 	rd->draw_list_end();
 
 	rd->draw_command_end_label();
+}
+
+void TexelSplatPipelineRD::_load_project_settings() {
+	splat_size_pixels = MAX(0.25f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/splat_size_pixels")));
+	debug_view = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/view")), 0, int32_t(DEBUG_VIEW_MAX - 1)));
+	debug_probe_layer = CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/probe_layer")), -1, int32_t(PROBE_LAYER_COUNT - 1));
+	debug_log_counters = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters"));
+	debug_log_counter_interval = MAX(1u, uint32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counter_interval_frames")));
+	draw_depth_test_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_test_enabled"));
+}
+
+void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
+	ERR_FAIL_NULL(p_rd);
+
+	debug_frame_index++;
+	if (!debug_log_counters || debug_frame_index % debug_log_counter_interval != 0) {
+		return;
+	}
+
+	Vector<uint8_t> counter_data = p_rd->buffer_get_data(counter_buffer, 0, sizeof(CounterData));
+	Vector<uint8_t> draw_args_data = p_rd->buffer_get_data(draw_args_buffer, 0, sizeof(DrawIndirectArgs));
+	if (counter_data.size() != sizeof(CounterData) || draw_args_data.size() != sizeof(DrawIndirectArgs)) {
+		return;
+	}
+
+	CounterData counters;
+	DrawIndirectArgs draw_args;
+	memcpy(&counters, counter_data.ptr(), sizeof(CounterData));
+	memcpy(&draw_args, draw_args_data.ptr(), sizeof(DrawIndirectArgs));
+
+	print_line("TexelSplat counters frame=" + String::num_uint64(debug_frame_index) +
+			" visible=" + String::num_uint64(counters.visible_count) +
+			" classified=" + String::num_uint64(counters.classified_count) +
+			" edge=" + String::num_uint64(counters.edge_count) +
+			" draw_instances=" + String::num_uint64(draw_args.instance_count) +
+			" capacity=" + String::num_uint64(texel_capacity));
 }
 
 RID TexelSplatPipelineRD::get_probe_layer_framebuffer(uint32_t p_layer) const {
@@ -298,12 +344,19 @@ bool TexelSplatPipelineRD::_create_draw_resources() {
 	RD::PipelineRasterizationState rasterization_state;
 	rasterization_state.cull_mode = RD::POLYGON_CULL_DISABLED;
 
+	RD::PipelineDepthStencilState depth_stencil_state;
+	if (draw_depth_test_enabled) {
+		depth_stencil_state.enable_depth_test = true;
+		depth_stencil_state.enable_depth_write = true;
+		depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+	}
+
 	draw_pipeline.setup(
 			draw_shader_rd,
 			RD::RENDER_PRIMITIVE_TRIANGLES,
 			rasterization_state,
 			RD::PipelineMultisampleState(),
-			RD::PipelineDepthStencilState(),
+			depth_stencil_state,
 			RD::PipelineColorBlendState::create_blend(),
 			0);
 
@@ -315,10 +368,12 @@ bool TexelSplatPipelineRD::_create_draw_resources() {
 
 	Vector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_ALBEDO].texture })));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_RADIAL].texture })));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, visible_refs_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, splat_flags_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, draw_state_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_NORMAL].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_RADIAL].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_OBJECT_ID].texture })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, visible_refs_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, splat_flags_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, draw_state_buffer));
 
 	draw_uniform_set = rd->uniform_set_create(uniforms, draw_shader_rd, 0);
 	ERR_FAIL_COND_V_MSG(draw_uniform_set.is_null(), false, "Failed to create texel splatting draw uniform set.");

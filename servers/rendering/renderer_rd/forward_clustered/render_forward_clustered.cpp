@@ -3138,7 +3138,16 @@ void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_
 	ERR_FAIL_COND(rb.is_null());
 	ERR_FAIL_COND(!rb->has_internal_texture());
 
-	RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture());
+	RID framebuffer;
+	if (texel_splat_pipeline->is_draw_depth_test_enabled()) {
+		if (!rb->has_depth_texture()) {
+			WARN_PRINT_ONCE("Texel splatting depth test requested, but the render buffer has no depth texture. Skipping texel splat draw.");
+			return;
+		}
+		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture(), rb->get_depth_texture());
+	} else {
+		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture());
+	}
 	ERR_FAIL_COND(framebuffer.is_null());
 
 	Projection depth_correction;
