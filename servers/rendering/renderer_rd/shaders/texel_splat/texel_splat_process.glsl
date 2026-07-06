@@ -49,22 +49,92 @@ uint get_texel_index(uvec3 p_coord) {
 	return (p_coord.z * params.probe_size + p_coord.y) * params.probe_size + p_coord.x;
 }
 
+vec3 face_normal(uint p_face) {
+	if (p_face == 0u) {
+		return vec3(1.0, 0.0, 0.0);
+	} else if (p_face == 1u) {
+		return vec3(-1.0, 0.0, 0.0);
+	} else if (p_face == 2u) {
+		return vec3(0.0, 1.0, 0.0);
+	} else if (p_face == 3u) {
+		return vec3(0.0, -1.0, 0.0);
+	} else if (p_face == 4u) {
+		return vec3(0.0, 0.0, 1.0);
+	}
+	return vec3(0.0, 0.0, -1.0);
+}
+
+vec3 face_up(uint p_face) {
+	if (p_face == 2u) {
+		return vec3(0.0, 0.0, 1.0);
+	} else if (p_face == 3u) {
+		return vec3(0.0, 0.0, -1.0);
+	}
+	return vec3(0.0, -1.0, 0.0);
+}
+
+vec3 face_right(uint p_face) {
+	vec3 normal = face_normal(p_face);
+	vec3 up = face_up(p_face);
+	return normalize(cross(up, -normal));
+}
+
+vec3 face_direction(uint p_face, vec2 p_face_xy) {
+	vec3 normal = face_normal(p_face);
+	vec3 up = face_up(p_face);
+	vec3 right = face_right(p_face);
+	return normalize(normal + right * p_face_xy.x - up * p_face_xy.y);
+}
+
+uint direction_face(vec3 p_direction) {
+	vec3 ad = abs(p_direction);
+	if (ad.x >= ad.y && ad.x >= ad.z) {
+		return p_direction.x >= 0.0 ? 0u : 1u;
+	} else if (ad.y >= ad.x && ad.y >= ad.z) {
+		return p_direction.y >= 0.0 ? 2u : 3u;
+	}
+	return p_direction.z >= 0.0 ? 4u : 5u;
+}
+
+vec2 direction_face_xy(vec3 p_direction, uint p_face) {
+	vec3 normal = face_normal(p_face);
+	vec3 up = face_up(p_face);
+	vec3 right = face_right(p_face);
+	float denom = max(dot(p_direction, normal), 0.00001);
+	return vec2(dot(p_direction, right) / denom, -dot(p_direction, up) / denom);
+}
+
+ivec3 resolve_neighbor_coord(ivec3 p_coord, ivec2 p_offset) {
+	ivec2 neighbor_xy = p_coord.xy + p_offset;
+	if (neighbor_xy.x >= 0 && neighbor_xy.y >= 0 && uint(neighbor_xy.x) < params.probe_size && uint(neighbor_xy.y) < params.probe_size) {
+		return ivec3(neighbor_xy, p_coord.z);
+	}
+
+	uint probe = uint(p_coord.z) / 6u;
+	uint current_face = uint(p_coord.z) - probe * 6u;
+	vec2 uv = (vec2(neighbor_xy) + vec2(0.5)) / float(params.probe_size);
+	vec2 current_face_xy = uv * 2.0 - 1.0;
+	vec3 direction = face_direction(current_face, current_face_xy);
+	uint neighbor_face = direction_face(direction);
+	vec2 neighbor_face_xy = direction_face_xy(direction, neighbor_face);
+	vec2 neighbor_uv = neighbor_face_xy * 0.5 + 0.5;
+	ivec2 resolved_xy = ivec2(clamp(floor(neighbor_uv * float(params.probe_size)), vec2(0.0), vec2(float(params.probe_size - 1u))));
+	uint resolved_layer = probe * 6u + neighbor_face;
+	return ivec3(resolved_xy, int(resolved_layer));
+}
+
 bool is_edge_texel(ivec3 p_coord, uint p_object_id, vec3 p_normal) {
 	bool edge = false;
 
-	if (uint(p_coord.x + 1) < params.probe_size) {
-		ivec3 neighbor_coord = p_coord + ivec3(1, 0, 0);
-		uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
-		vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
-		edge = edge || neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
-	}
+	ivec3 neighbor_coord = resolve_neighbor_coord(p_coord, ivec2(1, 0));
+	uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
+	vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
+	edge = edge || neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
 
-	if (uint(p_coord.y + 1) < params.probe_size) {
-		ivec3 neighbor_coord = p_coord + ivec3(0, 1, 0);
-		uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
-		vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
-		edge = edge || neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
-	}
+	neighbor_coord = resolve_neighbor_coord(p_coord, ivec2(0, 1));
+	neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
+	neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
+	edge = edge || neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
 
 	return edge;
 }
