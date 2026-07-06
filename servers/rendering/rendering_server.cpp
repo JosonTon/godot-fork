@@ -3716,7 +3716,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/driver/depth_prepass/disable_for_vendors", "PowerVR,Mali,Adreno,Apple");
 	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/enabled", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/renderer_rd/forward_plus/texel_splatting/splat_expansion_texels", PROPERTY_HINT_RANGE, "0,2,0.05"), 0.5);
-	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/view", PROPERTY_HINT_ENUM, "Albedo,Edge,Radial Depth,Normal,Object ID,Layer"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/view", PROPERTY_HINT_ENUM, "Albedo,Edge,Radial Depth,Normal,Object ID,Layer,Footprint"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/probe_layer", PROPERTY_HINT_RANGE, "-1,17,1"), -1);
 	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counter_interval_frames", PROPERTY_HINT_RANGE, "1,600,1"), 60);

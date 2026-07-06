@@ -28,6 +28,8 @@ layout(set = 0, binding = 6, std430) restrict readonly buffer DrawState {
 draw_state;
 
 layout(location = 0) out vec4 vertex_color;
+layout(location = 1) out vec2 footprint_uv;
+layout(location = 2) flat out uint debug_view_flat;
 
 const vec2 QUAD[6] = vec2[](
 	vec2(-0.5, -0.5),
@@ -77,13 +79,16 @@ void main() {
 	gl_Position = draw_state.view_projection * world_pos;
 
 	uint flags = splat_flags.data[texel_ref];
+	uint debug_view = uint(draw_state.debug_params.x);
+	footprint_uv = QUAD[gl_VertexIndex] + vec2(0.5);
+	debug_view_flat = debug_view;
+
 	int selected_layer = int(round(draw_state.debug_params.y));
 	if (selected_layer >= 0 && int(layer) != selected_layer) {
 		vertex_color = vec4(0.0);
 		return;
 	}
 
-	uint debug_view = uint(draw_state.debug_params.x);
 	bool edge = (flags & 2u) != 0u;
 	vec3 color = albedo.rgb;
 	if (debug_view == 1u) {
@@ -101,6 +106,9 @@ void main() {
 		color = hash_color(object_id);
 	} else if (debug_view == 5u) {
 		color = hash_color(layer + 1u);
+	} else if (debug_view == 6u) {
+		vertex_color = vec4(0.0, 0.75, 1.0, 1.0);
+		return;
 	}
 
 	vertex_color = vec4(color, min(max(albedo.a, 0.35), 1.0));
@@ -113,11 +121,27 @@ void main() {
 #VERSION_DEFINES
 
 layout(location = 0) in vec4 vertex_color;
+layout(location = 1) in vec2 footprint_uv;
+layout(location = 2) flat in uint debug_view_flat;
 layout(location = 0) out vec4 frag_color;
 
 void main() {
 	if (vertex_color.a <= 0.0) {
 		discard;
 	}
+
+	if (debug_view_flat == 6u) {
+		float border_distance = min(min(footprint_uv.x, 1.0 - footprint_uv.x), min(footprint_uv.y, 1.0 - footprint_uv.y));
+		float center_distance = min(abs(footprint_uv.x - 0.5), abs(footprint_uv.y - 0.5));
+		if (center_distance < 0.035) {
+			frag_color = vec4(1.0, 0.95, 0.0, 1.0);
+		} else if (border_distance < 0.08) {
+			frag_color = vec4(1.0, 0.0, 0.95, 1.0);
+		} else {
+			frag_color = vec4(0.0, 0.75, 1.0, 1.0);
+		}
+		return;
+	}
+
 	frag_color = vertex_color;
 }
