@@ -3027,7 +3027,9 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef MODE_RENDER_TEXEL_GBUFFER
 
-	texel_albedo_output_buffer.rgb = albedo;
+	// MVP texel color path: carry material emission through the albedo probe until
+	// the texel pipeline grows a dedicated lit/emission field.
+	texel_albedo_output_buffer.rgb = clamp(albedo + emission, vec3(0.0), vec3(1.0));
 	texel_albedo_output_buffer.a = alpha;
 
 	vec3 texel_world_normal = normalize(mat3(inv_view_matrix) * normal);
