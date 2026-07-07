@@ -32,6 +32,7 @@
 
 STATIC_ASSERT_INCOMPLETE_TYPE(class, RenderingServer);
 
+#include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
@@ -662,6 +663,7 @@ void GeometryInstance3D::_bind_methods() {
 
 GeometryInstance3D::GeometryInstance3D() {
 	_define_ancestry(AncestralClass::GEOMETRY_INSTANCE_3D);
+	set_texel_splatting_enabled(bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/default_geometry_enabled")));
 }
 
 GeometryInstance3D::~GeometryInstance3D() {
