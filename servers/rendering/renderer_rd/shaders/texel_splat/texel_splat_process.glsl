@@ -25,6 +25,10 @@ layout(set = 0, binding = 6, std430) restrict buffer Counters {
 	uint visible_count;
 	uint classified_count;
 	uint edge_count;
+	uint cross_face_sample_count;
+	uint cross_face_resolved_count;
+	uint cross_face_empty_suppressed_count;
+	uint cross_face_edge_count;
 	uint pad;
 }
 counters;
@@ -133,25 +137,31 @@ ivec3 resolve_neighbor_coord(ivec3 p_coord, ivec2 p_offset, out bool r_cross_fac
 	return ivec3(resolved_xy, int(resolved_layer));
 }
 
-bool is_edge_texel(ivec3 p_coord, uint p_object_id, vec3 p_normal) {
-	bool edge = false;
-
+bool classify_neighbor_edge(ivec3 p_coord, ivec2 p_offset, uint p_object_id, vec3 p_normal) {
 	bool cross_face = false;
-	ivec3 neighbor_coord = resolve_neighbor_coord(p_coord, ivec2(1, 0), cross_face);
+	ivec3 neighbor_coord = resolve_neighbor_coord(p_coord, p_offset, cross_face);
 	uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
-	if (!cross_face || neighbor_object_id != 0u) {
-		vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
-		edge = edge || neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
+	if (cross_face) {
+		atomicAdd(counters.cross_face_sample_count, 1u);
+		if (neighbor_object_id == 0u) {
+			atomicAdd(counters.cross_face_empty_suppressed_count, 1u);
+			return false;
+		}
+		atomicAdd(counters.cross_face_resolved_count, 1u);
 	}
 
-	neighbor_coord = resolve_neighbor_coord(p_coord, ivec2(0, 1), cross_face);
-	neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
-	if (!cross_face || neighbor_object_id != 0u) {
-		vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
-		edge = edge || neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
+	vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
+	bool edge = neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
+	if (cross_face && edge) {
+		atomicAdd(counters.cross_face_edge_count, 1u);
 	}
-
 	return edge;
+}
+
+bool is_edge_texel(ivec3 p_coord, uint p_object_id, vec3 p_normal) {
+	bool edge_x = classify_neighbor_edge(p_coord, ivec2(1, 0), p_object_id, p_normal);
+	bool edge_y = classify_neighbor_edge(p_coord, ivec2(0, 1), p_object_id, p_normal);
+	return edge_x || edge_y;
 }
 
 void main() {

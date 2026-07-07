@@ -194,6 +194,10 @@ void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
 			" visible=" + String::num_uint64(counters.visible_count) +
 			" classified=" + String::num_uint64(counters.classified_count) +
 			" edge=" + String::num_uint64(counters.edge_count) +
+			" cross_face_samples=" + String::num_uint64(counters.cross_face_sample_count) +
+			" cross_face_resolved=" + String::num_uint64(counters.cross_face_resolved_count) +
+			" cross_face_empty_suppressed=" + String::num_uint64(counters.cross_face_empty_suppressed_count) +
+			" cross_face_edges=" + String::num_uint64(counters.cross_face_edge_count) +
 			" draw_instances=" + String::num_uint64(draw_args.instance_count) +
 			" capacity=" + String::num_uint64(texel_capacity));
 }

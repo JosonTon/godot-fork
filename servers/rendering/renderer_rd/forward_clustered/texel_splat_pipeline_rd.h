@@ -83,6 +83,10 @@ class TexelSplatPipelineRD {
 		uint32_t visible_count = 0;
 		uint32_t classified_count = 0;
 		uint32_t edge_count = 0;
+		uint32_t cross_face_sample_count = 0;
+		uint32_t cross_face_resolved_count = 0;
+		uint32_t cross_face_empty_suppressed_count = 0;
+		uint32_t cross_face_edge_count = 0;
 		uint32_t pad = 0;
 	};
 
