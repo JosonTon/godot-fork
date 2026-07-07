@@ -96,6 +96,11 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 		Vector3 direction = Vector3(0.0, 0.0, 1.0);
 		Color color = Color(1.0, 1.0, 1.0, 1.0);
 	} texel_splat_directional_light;
+	bool texel_splat_pre_transparent_draw_pending = false;
+	CameraData texel_splat_pre_transparent_camera_data;
+	Vector<Transform3D> texel_splat_pre_transparent_probe_face_transforms;
+
+	void _draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, bool p_pre_transparent);
 
 public:
 	/* Framebuffer */
@@ -834,6 +839,7 @@ public:
 	virtual uint32_t get_texel_splatting_probe_count() const override;
 	virtual void render_texel_splat_probe_gbuffer(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) override;
 	virtual void process_texel_splat_probe_data() override;
+	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) override;
 	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) override;
 
 	/* callback from updating our lighting UBOs, used to populate cluster builder */

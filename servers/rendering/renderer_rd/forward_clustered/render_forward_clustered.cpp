@@ -2384,6 +2384,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		rb->ensure_upscaled();
 	}
 
+	if (texel_splat_pre_transparent_draw_pending && !is_reflection_probe) {
+		RENDER_TIMESTAMP("Draw Texel Splats Pre Transparent");
+		_draw_texel_splats(p_render_data->render_buffers, &texel_splat_pre_transparent_camera_data, texel_splat_pre_transparent_probe_face_transforms, true);
+		texel_splat_pre_transparent_draw_pending = false;
+		texel_splat_pre_transparent_probe_face_transforms.clear();
+	}
+
 	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
 		RENDER_TIMESTAMP("Copy Screen Texture");
 
@@ -3137,7 +3144,26 @@ void RenderForwardClustered::process_texel_splat_probe_data() {
 	texel_splat_pipeline->process_probe_data();
 }
 
+void RenderForwardClustered::queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) {
+	ERR_FAIL_COND(!is_texel_splatting_enabled());
+	ERR_FAIL_NULL(texel_splat_pipeline);
+	ERR_FAIL_NULL(p_camera_data);
+	ERR_FAIL_COND(p_render_buffers.is_null());
+
+	if (p_camera_data->view_count != 1) {
+		return;
+	}
+
+	texel_splat_pre_transparent_camera_data = *p_camera_data;
+	texel_splat_pre_transparent_probe_face_transforms = p_probe_face_transforms;
+	texel_splat_pre_transparent_draw_pending = true;
+}
+
 void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) {
+	_draw_texel_splats(p_render_buffers, p_camera_data, p_probe_face_transforms, false);
+}
+
+void RenderForwardClustered::_draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, bool p_pre_transparent) {
 	ERR_FAIL_COND(!is_texel_splatting_enabled());
 	ERR_FAIL_NULL(texel_splat_pipeline);
 	ERR_FAIL_NULL(p_camera_data);
@@ -3155,7 +3181,13 @@ void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_
 	Size2i draw_size = rb->get_internal_size();
 	RID depth_test_copy_framebuffer;
 	Size2i depth_test_copy_size;
-	if (texel_splat_pipeline->is_draw_depth_test_enabled()) {
+	if (p_pre_transparent) {
+		if (!rb->has_depth_texture()) {
+			WARN_PRINT_ONCE("Texel splatting pre-transparent draw requested, but the render buffer has no depth texture. Skipping texel splat draw.");
+			return;
+		}
+		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture(), rb->get_depth_texture());
+	} else if (texel_splat_pipeline->is_draw_depth_test_enabled()) {
 		if (!rb->has_depth_texture()) {
 			WARN_PRINT_ONCE("Texel splatting depth test requested, but the render buffer has no depth texture. Skipping texel splat draw.");
 			return;

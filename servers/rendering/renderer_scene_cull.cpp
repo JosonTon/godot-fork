@@ -3313,13 +3313,17 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
 	const bool is_texel_probe_capture = p_texel_probe_layer >= 0;
 
-	// Prepare the light - camera volume culling system.
-	light_culler->prepare_camera(p_camera_data->main_transform, p_camera_data->main_projection);
-
 	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
 	Vector3 camera_position = p_camera_data->main_transform.origin;
 
 	ERR_FAIL_COND(p_render_buffers.is_null());
+
+	if (!is_texel_probe_capture && p_reflection_probe.is_null() && scene_render->is_texel_splatting_enabled()) {
+		_render_texel_splat_probe_captures(p_camera_data, p_render_buffers, p_environment, p_force_camera_attributes, p_visible_layers, p_scenario, p_shadow_atlas, p_screen_mesh_lod_threshold, p_window_output_max_value);
+	}
+
+	// Prepare the light - camera volume culling system.
+	light_culler->prepare_camera(p_camera_data->main_transform, p_camera_data->main_projection);
 
 	render_pass++;
 
@@ -3740,9 +3744,6 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		render_sdfgi_data[i].instances.clear();
 	}
 
-	if (!is_texel_probe_capture && p_reflection_probe.is_null() && scene_render->is_texel_splatting_enabled()) {
-		_render_texel_splat_probe_captures(p_camera_data, p_render_buffers, p_environment, p_force_camera_attributes, p_visible_layers, p_scenario, p_shadow_atlas, p_screen_mesh_lod_threshold, p_window_output_max_value);
-	}
 }
 
 void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, uint32_t p_visible_layers, RID p_scenario, RID p_shadow_atlas, float p_screen_mesh_lod_threshold, float p_window_output_max_value) {
@@ -3806,7 +3807,7 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 
 	RENDER_TIMESTAMP("Process Texel Probe Data");
 	scene_render->process_texel_splat_probe_data();
-	scene_render->draw_texel_splats(p_render_buffers, p_camera_data, probe_face_transforms);
+	scene_render->queue_texel_splat_pre_transparent_draw(p_render_buffers, p_camera_data, probe_face_transforms);
 }
 
 RID RendererSceneCull::_render_get_environment(RID p_camera, RID p_scenario) {
