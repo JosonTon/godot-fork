@@ -3734,6 +3734,8 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 	if (probe_count == 0) {
 		return;
 	}
+	const uint32_t texel_capture_layer_mask = uint32_t(int64_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/capture_layer_mask")));
+	const uint32_t texel_visible_layers = p_visible_layers & texel_capture_layer_mask;
 
 	static const Vector3 view_normals[6] = {
 		Vector3(+1, 0, 0),
@@ -3779,10 +3781,10 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 			probe_face_transforms.write[layer] = probe_face_transform;
 
 			RendererSceneRender::CameraData camera_data;
-			camera_data.set_camera(probe_face_transform, cm, false, false, Vector2(), 0.0f, p_camera_data->visible_layers);
+			camera_data.set_camera(probe_face_transform, cm, false, false, Vector2(), 0.0f, texel_visible_layers);
 
 			RENDER_TIMESTAMP("Render Texel Probe " + itos(probe) + ", Face " + itos(face));
-			_render_scene(&camera_data, p_render_buffers, p_environment, p_force_camera_attributes, RID(), p_visible_layers, p_scenario, RID(), p_shadow_atlas, RID(), 0, p_screen_mesh_lod_threshold, p_window_output_max_value, false, nullptr, int(layer));
+			_render_scene(&camera_data, p_render_buffers, p_environment, p_force_camera_attributes, RID(), texel_visible_layers, p_scenario, RID(), p_shadow_atlas, RID(), 0, p_screen_mesh_lod_threshold, p_window_output_max_value, false, nullptr, int(layer));
 		}
 	}
 
