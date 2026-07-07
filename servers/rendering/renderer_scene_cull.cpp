@@ -1312,6 +1312,18 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 				}
 			}
 		} break;
+		case RSE::INSTANCE_FLAG_USE_TEXEL_SPLATTING: {
+			instance->texel_splatting_enabled = p_enabled;
+
+			if (instance->scenario && instance->array_index >= 0) {
+				InstanceData &idata = instance->scenario->instance_data[instance->array_index];
+				if (instance->texel_splatting_enabled) {
+					idata.flags |= InstanceData::FLAG_TEXEL_SPLATTING_ENABLED;
+				} else {
+					idata.flags &= ~InstanceData::FLAG_TEXEL_SPLATTING_ENABLED;
+				}
+			}
+		} break;
 		default: {
 		}
 	}
@@ -1841,6 +1853,9 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		}
 		if (p_instance->ignore_all_culling) {
 			idata.flags |= InstanceData::FLAG_IGNORE_ALL_CULLING;
+		}
+		if (p_instance->texel_splatting_enabled) {
+			idata.flags |= InstanceData::FLAG_TEXEL_SPLATTING_ENABLED;
 		}
 
 		p_instance->scenario->instance_data.push_back(idata);
@@ -2981,7 +2996,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 						vnd->just_visible = true;
 					}
 					vnd->visible_in_frame = RSG::rasterizer->get_frame_number();
-				} else if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && !(idata.flags & InstanceData::FLAG_CAST_SHADOWS_ONLY)) {
+				} else if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && !(idata.flags & InstanceData::FLAG_CAST_SHADOWS_ONLY) && (!cull_data.texel_splatting_only || (idata.flags & InstanceData::FLAG_TEXEL_SPLATTING_ENABLED))) {
 					bool keep = true;
 
 					if (idata.flags & InstanceData::FLAG_REDRAW_IF_VISIBLE) {
@@ -3428,6 +3443,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		cull_data.shadow_atlas = p_shadow_atlas;
 		cull_data.cam_transform = p_camera_data->main_transform;
 		cull_data.visible_layers = p_visible_layers;
+		cull_data.texel_splatting_only = is_texel_probe_capture;
 		cull_data.render_reflection_probe = render_reflection_probe;
 		cull_data.occlusion_buffer = RendererSceneOcclusionCull::get_singleton()->buffer_get_ptr(p_viewport);
 		cull_data.camera_matrix = &p_camera_data->main_projection;

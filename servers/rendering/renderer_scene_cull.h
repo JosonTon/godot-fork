@@ -276,6 +276,7 @@ public:
 			FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN = (1 << 22),
 			FLAG_GEOM_PROJECTOR_SOFTSHADOW_DIRTY = (1 << 23),
 			FLAG_IGNORE_ALL_CULLING = (1 << 24),
+			FLAG_TEXEL_SPLATTING_ENABLED = (1 << 25),
 		};
 
 		uint32_t flags = 0;
@@ -429,6 +430,7 @@ public:
 		bool baked_light : 1; // This flag is only to know if it actually did use baked light.
 		bool dynamic_gi : 1; // Same as above for dynamic objects.
 		bool redraw_if_visible : 1;
+		bool texel_splatting_enabled : 1;
 
 		Instance *lightmap = nullptr;
 		Rect2 lightmap_uv_scale;
@@ -570,6 +572,7 @@ public:
 			baked_light = true;
 			dynamic_gi = false;
 			redraw_if_visible = false;
+			texel_splatting_enabled = true;
 
 			lightmap_slice_index = 0;
 			lightmap = nullptr;
@@ -1144,6 +1147,7 @@ public:
 		RID shadow_atlas;
 		Transform3D cam_transform;
 		uint32_t visible_layers;
+		bool texel_splatting_only = false;
 		Instance *render_reflection_probe = nullptr;
 		const RendererSceneOcclusionCull::HZBuffer *occlusion_buffer;
 		const Projection *camera_matrix;

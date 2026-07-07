@@ -143,6 +143,7 @@ private:
 	float lightmap_texel_scale = 1.0f;
 	GIMode gi_mode = GI_MODE_STATIC;
 	bool ignore_occlusion_culling = false;
+	bool texel_splatting_enabled = true;
 
 	const StringName *_instance_uniform_get_remap(const StringName &p_name) const;
 
@@ -207,6 +208,9 @@ public:
 
 	void set_ignore_occlusion_culling(bool p_enabled);
 	bool is_ignoring_occlusion_culling();
+
+	void set_texel_splatting_enabled(bool p_enabled);
+	bool is_texel_splatting_enabled() const;
 
 	virtual Ref<TriangleMesh> generate_triangle_mesh() const;
 
