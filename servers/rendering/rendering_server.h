@@ -185,6 +185,8 @@ public:
 	virtual void material_set_render_priority(RID p_material, int priority) = 0;
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) = 0;
+	virtual void material_set_texel_splatting_mode(RID p_material, RSE::MaterialTexelSplattingMode p_mode) = 0;
+	virtual RSE::MaterialTexelSplattingMode material_get_texel_splatting_mode(RID p_material) const = 0;
 
 	virtual void material_set_use_debanding(bool p_enable) = 0;
 

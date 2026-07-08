@@ -2592,6 +2592,26 @@ void MaterialStorage::material_set_render_priority(RID p_material, int priority)
 	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 }
 
+void MaterialStorage::material_set_texel_splatting_mode(RID p_material, RSE::MaterialTexelSplattingMode p_mode) {
+	Material *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL(material);
+
+	ERR_FAIL_INDEX(int(p_mode), int(RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE) + 1);
+
+	if (material->texel_splatting_mode == p_mode) {
+		return;
+	}
+
+	material->texel_splatting_mode = p_mode;
+	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+}
+
+RSE::MaterialTexelSplattingMode MaterialStorage::material_get_texel_splatting_mode(RID p_material) const {
+	Material *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL_V(material, RSE::MATERIAL_TEXEL_SPLATTING_INHERIT);
+	return material->texel_splatting_mode;
+}
+
 bool MaterialStorage::material_is_animated(RID p_material) {
 	Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL_V(material, false);

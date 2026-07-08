@@ -82,6 +82,25 @@ int Material::get_render_priority() const {
 	return render_priority;
 }
 
+void Material::set_texel_splatting_mode(TexelSplattingMode p_mode) {
+	ERR_FAIL_INDEX(int(p_mode), int(TEXEL_SPLATTING_FORCE_DISABLE) + 1);
+
+	RSE::MaterialTexelSplattingMode mode = RSE::MaterialTexelSplattingMode(p_mode);
+	if (texel_splatting_mode == mode) {
+		return;
+	}
+
+	texel_splatting_mode = mode;
+
+	if (material.is_valid()) {
+		RS::get_singleton()->material_set_texel_splatting_mode(material, mode);
+	}
+}
+
+Material::TexelSplattingMode Material::get_texel_splatting_mode() const {
+	return TexelSplattingMode(texel_splatting_mode);
+}
+
 RID Material::get_rid() const {
 	return material;
 }
@@ -164,16 +183,25 @@ void Material::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_render_priority", "priority"), &Material::set_render_priority);
 	ClassDB::bind_method(D_METHOD("get_render_priority"), &Material::get_render_priority);
 
+	ClassDB::bind_method(D_METHOD("set_texel_splatting_mode", "mode"), &Material::set_texel_splatting_mode);
+	ClassDB::bind_method(D_METHOD("get_texel_splatting_mode"), &Material::get_texel_splatting_mode);
+
 	ClassDB::bind_method(D_METHOD("inspect_native_shader_code"), &Material::inspect_native_shader_code);
 	ClassDB::set_method_flags(get_class_static(), StringName("inspect_native_shader_code"), METHOD_FLAGS_DEFAULT | METHOD_FLAG_EDITOR);
 
 	ClassDB::bind_method(D_METHOD("create_placeholder"), &Material::create_placeholder);
+
+	ADD_GROUP("Texel Splatting", "texel_splatting_");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "texel_splatting_mode", PROPERTY_HINT_ENUM, "Inherit,Force Enable,Force Disable"), "set_texel_splatting_mode", "get_texel_splatting_mode");
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_priority", PROPERTY_HINT_RANGE, itos(RENDER_PRIORITY_MIN) + "," + itos(RENDER_PRIORITY_MAX) + ",1"), "set_render_priority", "get_render_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "next_pass", PROPERTY_HINT_RESOURCE_TYPE, Material::get_class_static()), "set_next_pass", "get_next_pass");
 
 	BIND_CONSTANT(RENDER_PRIORITY_MAX);
 	BIND_CONSTANT(RENDER_PRIORITY_MIN);
+	BIND_ENUM_CONSTANT(TEXEL_SPLATTING_INHERIT);
+	BIND_ENUM_CONSTANT(TEXEL_SPLATTING_FORCE_ENABLE);
+	BIND_ENUM_CONSTANT(TEXEL_SPLATTING_FORCE_DISABLE);
 
 	GDVIRTUAL_BIND(_get_shader_rid)
 	GDVIRTUAL_BIND(_get_shader_mode)
@@ -472,6 +500,7 @@ void ShaderMaterial::_check_material_rid() const {
 		}
 
 		_set_material(RS::get_singleton()->material_create_from_shader(next_pass_rid, get_render_priority(), shader_rid));
+		RS::get_singleton()->material_set_texel_splatting_mode(_get_material(), RSE::MaterialTexelSplattingMode(get_texel_splatting_mode()));
 
 		for (KeyValue<StringName, Variant> param : param_cache) {
 			if (param.value.get_type() == Variant::OBJECT) {
@@ -2074,6 +2103,7 @@ void BaseMaterial3D::_check_material_rid() {
 		}
 
 		_set_material(RS::get_singleton()->material_create_from_shader(next_pass_rid, get_render_priority(), shader_rid));
+		RS::get_singleton()->material_set_texel_splatting_mode(_get_material(), RSE::MaterialTexelSplattingMode(get_texel_splatting_mode()));
 
 		for (KeyValue<StringName, Variant> param : pending_params) {
 			RS::get_singleton()->material_set_param(_get_material(), param.key, param.value);

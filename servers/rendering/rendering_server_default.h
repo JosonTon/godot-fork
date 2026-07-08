@@ -350,6 +350,8 @@ public:
 
 	FUNC2(material_set_render_priority, RID, int)
 	FUNC2(material_set_next_pass, RID, RID)
+	FUNC2(material_set_texel_splatting_mode, RID, RSE::MaterialTexelSplattingMode)
+	FUNC1RC(RSE::MaterialTexelSplattingMode, material_get_texel_splatting_mode, RID)
 
 	/* MESH API */
 

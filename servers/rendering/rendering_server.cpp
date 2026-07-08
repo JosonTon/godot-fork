@@ -2348,11 +2348,16 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("material_set_render_priority", "material", "priority"), &RenderingServer::material_set_render_priority);
 
 	ClassDB::bind_method(D_METHOD("material_set_next_pass", "material", "next_material"), &RenderingServer::material_set_next_pass);
+	ClassDB::bind_method(D_METHOD("material_set_texel_splatting_mode", "material", "mode"), &RenderingServer::material_set_texel_splatting_mode);
+	ClassDB::bind_method(D_METHOD("material_get_texel_splatting_mode", "material"), &RenderingServer::material_get_texel_splatting_mode);
 
 	ClassDB::bind_method(D_METHOD("material_set_use_debanding", "enable"), &RenderingServer::material_set_use_debanding);
 
 	BIND_CONSTANT(RSE::MATERIAL_RENDER_PRIORITY_MIN);
 	BIND_CONSTANT(RSE::MATERIAL_RENDER_PRIORITY_MAX);
+	BIND_ENUM_CONSTANT(RSE::MATERIAL_TEXEL_SPLATTING_INHERIT);
+	BIND_ENUM_CONSTANT(RSE::MATERIAL_TEXEL_SPLATTING_FORCE_ENABLE);
+	BIND_ENUM_CONSTANT(RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE);
 
 	/* MESH API */
 

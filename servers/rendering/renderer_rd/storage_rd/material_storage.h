@@ -299,6 +299,7 @@ private:
 		HashMap<StringName, Variant> params;
 		int32_t priority = 0;
 		RID next_pass;
+		RSE::MaterialTexelSplattingMode texel_splatting_mode = RSE::MATERIAL_TEXEL_SPLATTING_INHERIT;
 		SelfList<Material> update_element;
 
 		Dependency dependency;
@@ -499,6 +500,8 @@ public:
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;
+	virtual void material_set_texel_splatting_mode(RID p_material, RSE::MaterialTexelSplattingMode p_mode) override;
+	virtual RSE::MaterialTexelSplattingMode material_get_texel_splatting_mode(RID p_material) const override;
 
 	virtual bool material_is_animated(RID p_material) override;
 	virtual bool material_casts_shadows(RID p_material) override;

@@ -43,6 +43,7 @@ class Material : public Resource {
 	mutable RID material;
 	Ref<Material> next_pass;
 	int render_priority;
+	RSE::MaterialTexelSplattingMode texel_splatting_mode = RSE::MATERIAL_TEXEL_SPLATTING_INHERIT;
 
 	enum {
 		INIT_STATE_UNINITIALIZED,
@@ -74,6 +75,12 @@ public:
 		RENDER_PRIORITY_MIN = RSE::MATERIAL_RENDER_PRIORITY_MIN,
 	};
 
+	enum TexelSplattingMode {
+		TEXEL_SPLATTING_INHERIT = RSE::MATERIAL_TEXEL_SPLATTING_INHERIT,
+		TEXEL_SPLATTING_FORCE_ENABLE = RSE::MATERIAL_TEXEL_SPLATTING_FORCE_ENABLE,
+		TEXEL_SPLATTING_FORCE_DISABLE = RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE,
+	};
+
 	bool _is_initialized() { return init_state == INIT_STATE_READY; }
 
 	void set_next_pass(const Ref<Material> &p_pass);
@@ -81,6 +88,9 @@ public:
 
 	void set_render_priority(int p_priority);
 	int get_render_priority() const;
+
+	void set_texel_splatting_mode(TexelSplattingMode p_mode);
+	TexelSplattingMode get_texel_splatting_mode() const;
 
 	virtual RID get_rid() const override;
 	virtual RID get_shader_rid() const;
@@ -937,3 +947,5 @@ public:
 };
 
 //////////////////////
+
+VARIANT_ENUM_CAST(Material::TexelSplattingMode)

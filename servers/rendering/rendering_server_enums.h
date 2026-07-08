@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "core/variant/type_info.h"
+
 #include <cstdint>
 
 namespace RenderingServerEnums {
@@ -119,6 +121,12 @@ enum CullMode {
 enum {
 	MATERIAL_RENDER_PRIORITY_MIN = -128,
 	MATERIAL_RENDER_PRIORITY_MAX = 127,
+};
+
+enum MaterialTexelSplattingMode {
+	MATERIAL_TEXEL_SPLATTING_INHERIT,
+	MATERIAL_TEXEL_SPLATTING_FORCE_ENABLE,
+	MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE,
 };
 
 /* MESH API */
@@ -944,3 +952,5 @@ enum Features {
 
 // Alias to make it easier to use.
 #define RSE RenderingServerEnums
+
+VARIANT_ENUM_CAST(RenderingServerEnums::MaterialTexelSplattingMode)
