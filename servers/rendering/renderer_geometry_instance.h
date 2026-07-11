@@ -61,6 +61,7 @@ public:
 	virtual void set_lightmap_capture(const Color *p_sh9) = 0;
 	virtual void set_instance_shader_uniforms_offset(int32_t p_offset) = 0;
 	virtual void set_cast_double_sided_shadows(bool p_enable) = 0;
+	virtual void set_texel_splatting_enabled(bool p_enable) {}
 
 	virtual void reset_motion_vectors() = 0;
 
@@ -98,6 +99,7 @@ public:
 	bool use_aabb_center = true;
 
 	uint32_t layer_mask = 1;
+	bool texel_splatting_enabled = true;
 
 	bool fade_near = false;
 	float fade_near_begin = 0;
@@ -148,6 +150,7 @@ public:
 	virtual void set_use_dynamic_gi(bool p_enable) override;
 	virtual void set_instance_shader_uniforms_offset(int32_t p_offset) override;
 	virtual void set_cast_double_sided_shadows(bool p_enable) override;
+	virtual void set_texel_splatting_enabled(bool p_enable) override;
 
 	virtual void reset_motion_vectors() override;
 

@@ -29,7 +29,7 @@ layout(set = 0, binding = 6, std430) restrict buffer Counters {
 	uint cross_face_resolved_count;
 	uint cross_face_empty_suppressed_count;
 	uint cross_face_edge_count;
-	uint pad;
+	uint cross_object_continuity_count;
 }
 counters;
 
@@ -45,12 +45,29 @@ layout(push_constant, std430) uniform Params {
 	uint probe_size;
 	uint layer_count;
 	uint max_visible_refs;
-	uint pad;
+	uint active_layer_mask;
 }
 params;
 
+const uint FLAG_VISIBLE = 1u;
+const uint FLAG_DEBUG_EDGE = 2u;
+const uint FLAG_CONT_LEFT = 16u;
+const uint FLAG_CONT_RIGHT = 32u;
+const uint FLAG_CONT_BOTTOM = 64u;
+const uint FLAG_CONT_TOP = 128u;
+const float EDGE_DEPTH_THRESHOLD = 0.002;
+
 uint get_texel_index(uvec3 p_coord) {
 	return (p_coord.z * params.probe_size + p_coord.y) * params.probe_size + p_coord.x;
+}
+
+bool resolve_same_face_neighbor_coord(ivec3 p_coord, ivec2 p_offset, out ivec3 r_neighbor_coord) {
+	ivec2 neighbor_xy = p_coord.xy + p_offset;
+	if (neighbor_xy.x >= 0 && neighbor_xy.y >= 0 && uint(neighbor_xy.x) < params.probe_size && uint(neighbor_xy.y) < params.probe_size) {
+		r_neighbor_coord = ivec3(neighbor_xy, p_coord.z);
+		return true;
+	}
+	return false;
 }
 
 vec3 face_normal(uint p_face) {
@@ -87,7 +104,7 @@ vec3 face_direction(uint p_face, vec2 p_face_xy) {
 	vec3 normal = face_normal(p_face);
 	vec3 up = face_up(p_face);
 	vec3 right = face_right(p_face);
-	return normalize(normal + right * p_face_xy.x - up * p_face_xy.y);
+	return normalize(normal + right * p_face_xy.x + up * p_face_xy.y);
 }
 
 uint direction_face(vec3 p_direction) {
@@ -105,10 +122,10 @@ vec2 direction_face_xy(vec3 p_direction, uint p_face) {
 	vec3 up = face_up(p_face);
 	vec3 right = face_right(p_face);
 	float denom = max(dot(p_direction, normal), 0.00001);
-	return vec2(dot(p_direction, right) / denom, -dot(p_direction, up) / denom);
+	return vec2(dot(p_direction, right) / denom, dot(p_direction, up) / denom);
 }
 
-ivec3 resolve_neighbor_coord(ivec3 p_coord, ivec2 p_offset, out bool r_cross_face) {
+ivec3 resolve_debug_neighbor_coord(ivec3 p_coord, ivec2 p_offset, out bool r_cross_face) {
 	ivec2 neighbor_xy = p_coord.xy + p_offset;
 	if (neighbor_xy.x >= 0 && neighbor_xy.y >= 0 && uint(neighbor_xy.x) < params.probe_size && uint(neighbor_xy.y) < params.probe_size) {
 		r_cross_face = false;
@@ -119,34 +136,39 @@ ivec3 resolve_neighbor_coord(ivec3 p_coord, ivec2 p_offset, out bool r_cross_fac
 	uint probe = uint(p_coord.z) / 6u;
 	uint current_face = uint(p_coord.z) - probe * 6u;
 	vec2 uv = (vec2(neighbor_xy) + vec2(0.5)) / float(params.probe_size);
-	vec2 current_face_xy = uv * 2.0 - 1.0;
-	vec3 direction = face_direction(current_face, current_face_xy);
+	vec3 direction = face_direction(current_face, uv * 2.0 - 1.0);
 	uint neighbor_face = direction_face(direction);
-	vec2 neighbor_face_xy = direction_face_xy(direction, neighbor_face);
-	vec2 neighbor_uv = neighbor_face_xy * 0.5 + 0.5;
+	vec2 neighbor_uv = direction_face_xy(direction, neighbor_face) * 0.5 + 0.5;
 	vec2 min_coord = vec2(0.0);
 	vec2 max_coord = vec2(float(params.probe_size - 1u));
 	if (params.probe_size > 8u) {
-		// Cross-face samples land exactly on the adjacent face border for seam texels.
-		// Pull them inward to avoid classifying probe raster border gaps as geometry edges.
 		min_coord = vec2(4.0);
 		max_coord = vec2(float(params.probe_size - 5u));
 	}
 	ivec2 resolved_xy = ivec2(clamp(floor(neighbor_uv * float(params.probe_size)), min_coord, max_coord));
-	uint resolved_layer = probe * 6u + neighbor_face;
-	return ivec3(resolved_xy, int(resolved_layer));
+	return ivec3(resolved_xy, int(probe * 6u + neighbor_face));
 }
 
-bool classify_neighbor_edge(ivec3 p_coord, ivec2 p_offset, uint p_object_id, vec3 p_normal) {
+bool classify_neighbor_debug_edge(ivec3 p_coord, ivec2 p_offset, uint p_object_id, vec3 p_normal) {
 	bool cross_face = false;
-	ivec3 neighbor_coord = resolve_neighbor_coord(p_coord, p_offset, cross_face);
-	uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
+	ivec3 neighbor_coord = resolve_debug_neighbor_coord(p_coord, p_offset, cross_face);
 	if (cross_face) {
 		atomicAdd(counters.cross_face_sample_count, 1u);
-		if (neighbor_object_id == 0u) {
+		if ((params.active_layer_mask & (1u << uint(neighbor_coord.z))) == 0u) {
 			atomicAdd(counters.cross_face_empty_suppressed_count, 1u);
 			return false;
 		}
+	}
+
+	uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
+	if (neighbor_object_id == 0u) {
+		if (cross_face) {
+			atomicAdd(counters.cross_face_empty_suppressed_count, 1u);
+			return false;
+		}
+		return true;
+	}
+	if (cross_face) {
 		atomicAdd(counters.cross_face_resolved_count, 1u);
 	}
 
@@ -158,10 +180,39 @@ bool classify_neighbor_edge(ivec3 p_coord, ivec2 p_offset, uint p_object_id, vec
 	return edge;
 }
 
-bool is_edge_texel(ivec3 p_coord, uint p_object_id, vec3 p_normal) {
-	bool edge_x = classify_neighbor_edge(p_coord, ivec2(1, 0), p_object_id, p_normal);
-	bool edge_y = classify_neighbor_edge(p_coord, ivec2(0, 1), p_object_id, p_normal);
-	return edge_x || edge_y;
+bool classify_neighbor_continuity(ivec3 p_coord, ivec2 p_offset, uint p_object_id, float p_radial_depth) {
+	ivec3 neighbor_coord;
+	if (!resolve_same_face_neighbor_coord(p_coord, p_offset, neighbor_coord)) {
+		return true;
+	}
+	float neighbor_depth = texelFetch(probe_radial, neighbor_coord, 0).r;
+	if (neighbor_depth <= 0.0) {
+		return false;
+	}
+	float relative_depth_delta = abs(p_radial_depth - neighbor_depth) / max(max(p_radial_depth, neighbor_depth), 0.00001);
+	bool continuous = relative_depth_delta < EDGE_DEPTH_THRESHOLD;
+	uint neighbor_object_id = texelFetch(probe_object_id, neighbor_coord, 0).r;
+	if (continuous && neighbor_object_id != 0u && neighbor_object_id != p_object_id) {
+		atomicAdd(counters.cross_object_continuity_count, 1u);
+	}
+	return continuous;
+}
+
+uint get_continuity_mask(ivec3 p_coord, uint p_object_id, float p_radial_depth) {
+	uint mask = 0u;
+	mask |= classify_neighbor_continuity(p_coord, ivec2(-1, 0), p_object_id, p_radial_depth) ? FLAG_CONT_LEFT : 0u;
+	mask |= classify_neighbor_continuity(p_coord, ivec2(1, 0), p_object_id, p_radial_depth) ? FLAG_CONT_RIGHT : 0u;
+	mask |= classify_neighbor_continuity(p_coord, ivec2(0, -1), p_object_id, p_radial_depth) ? FLAG_CONT_BOTTOM : 0u;
+	mask |= classify_neighbor_continuity(p_coord, ivec2(0, 1), p_object_id, p_radial_depth) ? FLAG_CONT_TOP : 0u;
+	return mask;
+}
+
+bool is_debug_edge_texel(ivec3 p_coord, uint p_object_id, vec3 p_normal) {
+	bool edge_left = classify_neighbor_debug_edge(p_coord, ivec2(-1, 0), p_object_id, p_normal);
+	bool edge_right = classify_neighbor_debug_edge(p_coord, ivec2(1, 0), p_object_id, p_normal);
+	bool edge_bottom = classify_neighbor_debug_edge(p_coord, ivec2(0, -1), p_object_id, p_normal);
+	bool edge_top = classify_neighbor_debug_edge(p_coord, ivec2(0, 1), p_object_id, p_normal);
+	return edge_left || edge_right || edge_bottom || edge_top;
 }
 
 void main() {
@@ -172,17 +223,24 @@ void main() {
 
 	ivec3 icoord = ivec3(coord);
 	uint texel_index = get_texel_index(coord);
+	if ((params.active_layer_mask & (1u << coord.z)) == 0u) {
+		splat_flags.data[texel_index] = 0u;
+		return;
+	}
+
 	uint object_id = texelFetch(probe_object_id, icoord, 0).r;
 	vec4 albedo = texelFetch(probe_albedo, icoord, 0);
 	float radial_depth = texelFetch(probe_radial, icoord, 0).r;
 
 	bool visible = object_id != 0u && radial_depth > 0.0 && albedo.a > 0.0;
-	uint flags = visible ? 1u : 0u;
+	uint flags = visible ? FLAG_VISIBLE : 0u;
 
 	if (visible) {
 		vec3 normal = normalize(texelFetch(probe_normal, icoord, 0).xyz * 2.0 - 1.0);
-		bool edge = is_edge_texel(icoord, object_id, normal);
-		flags |= edge ? 2u : 0u;
+		uint continuity_mask = get_continuity_mask(icoord, object_id, radial_depth);
+		flags |= continuity_mask;
+		bool edge = is_debug_edge_texel(icoord, object_id, normal);
+		flags |= edge ? FLAG_DEBUG_EDGE : 0u;
 
 		uint compact_index = atomicAdd(draw_args.instance_count, 1u);
 		if (compact_index < params.max_visible_refs) {

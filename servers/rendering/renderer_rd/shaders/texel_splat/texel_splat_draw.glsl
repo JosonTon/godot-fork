@@ -21,11 +21,12 @@ splat_flags;
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer DrawState {
 	mat4 view_projection;
-	mat4 probe_transforms[18];
+	mat4 probe_transforms[6];
 	vec4 params;
 	vec4 debug_params;
 	vec4 directional_light_direction;
 	vec4 directional_light_color;
+	vec4 camera_position;
 }
 draw_state;
 
@@ -41,6 +42,12 @@ const vec2 QUAD[6] = vec2[](
 	vec2(0.5, -0.5),
 	vec2(0.5, 0.5)
 );
+
+const uint FLAG_DEBUG_EDGE = 2u;
+const uint FLAG_CONT_LEFT = 16u;
+const uint FLAG_CONT_RIGHT = 32u;
+const uint FLAG_CONT_BOTTOM = 64u;
+const uint FLAG_CONT_TOP = 128u;
 
 vec3 hash_color(uint value) {
 	value ^= value >> 16;
@@ -58,6 +65,18 @@ vec3 decode_probe_normal(vec3 encoded_normal) {
 	return normalize(encoded_normal * 2.0 - 1.0);
 }
 
+vec3 probe_view_direction_from_uv(vec2 p_uv) {
+	vec2 face_xy = p_uv * 2.0 - 1.0;
+	return vec3(face_xy.x, face_xy.y, -1.0);
+}
+
+vec4 probe_world_position(uint p_layer, vec2 p_uv, float p_radial_depth) {
+	vec3 raw_dir = probe_view_direction_from_uv(p_uv);
+	float max_comp = max(abs(raw_dir.x), max(abs(raw_dir.y), abs(raw_dir.z)));
+	vec3 probe_view_pos = raw_dir * (p_radial_depth / max(max_comp, 0.00001));
+	return draw_state.probe_transforms[p_layer] * vec4(probe_view_pos, 1.0);
+}
+
 void main() {
 	uint probe_size = uint(draw_state.params.x);
 	uint texel_ref = visible_refs.data[gl_InstanceIndex];
@@ -71,20 +90,30 @@ void main() {
 	vec3 encoded_normal = texelFetch(probe_normal, probe_coord, 0).xyz;
 	float radial_depth = texelFetch(probe_radial, probe_coord, 0).r;
 	uint object_id = texelFetch(probe_object_id, probe_coord, 0).r;
+	uint flags = splat_flags.data[texel_ref];
 
 	vec2 uv = (vec2(x, y) + vec2(0.5)) / float(probe_size);
 	float half_texel = 0.5 / float(probe_size);
 	float expansion = max(draw_state.params.y, 0.0) / float(probe_size);
-	float half_splat = half_texel + expansion;
-	vec2 corner_uv = uv + QUAD[gl_VertexIndex] * 2.0 * half_splat;
-	vec2 corner_face_xy = corner_uv * 2.0 - 1.0;
-	vec3 raw_dir = vec3(corner_face_xy.x, -corner_face_xy.y, -1.0);
-	float max_comp = max(abs(raw_dir.x), max(abs(raw_dir.y), abs(raw_dir.z)));
-	vec3 probe_view_pos = raw_dir * (radial_depth / max(max_comp, 0.00001));
-	vec4 world_pos = draw_state.probe_transforms[layer] * vec4(probe_view_pos, 1.0);
+	vec4 center_world_pos = probe_world_position(layer, uv, radial_depth);
+	vec3 face_normal = normalize(mat3(draw_state.probe_transforms[layer]) * vec3(0.0, 0.0, -1.0));
+	vec3 view_dir = normalize(center_world_pos.xyz - draw_state.camera_position.xyz);
+	float cos_theta = max(abs(dot(view_dir, face_normal)), 0.14);
+	float tan_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0)) / cos_theta;
+	float half_edge = half_texel * 1.15 + 0.0005 * tan_theta;
+	float half_fill = max(half_texel + expansion, half_edge);
+	float half_left = (flags & FLAG_CONT_LEFT) != 0u ? half_edge : half_fill;
+	float half_right = (flags & FLAG_CONT_RIGHT) != 0u ? half_edge : half_fill;
+	float half_bottom = (flags & FLAG_CONT_BOTTOM) != 0u ? half_edge : half_fill;
+	float half_top = (flags & FLAG_CONT_TOP) != 0u ? half_edge : half_fill;
+	vec2 quad_corner = QUAD[gl_VertexIndex] * 2.0;
+	vec2 corner_uv = uv + vec2(quad_corner.x < 0.0 ? -half_left : half_right, quad_corner.y < 0.0 ? -half_bottom : half_top);
+	vec4 world_pos = probe_world_position(layer, corner_uv, radial_depth);
 	gl_Position = draw_state.view_projection * world_pos;
+	uint h = ((layer * probe_size * probe_size + y * probe_size + x) * 2654435761u) >> 24u;
+	gl_Position.z += float(h) * 1e-9 * gl_Position.w;
+	gl_Position.z = min(gl_Position.z, gl_Position.w);
 
-	uint flags = splat_flags.data[texel_ref];
 	uint debug_view = uint(draw_state.debug_params.x);
 	footprint_uv = QUAD[gl_VertexIndex] + vec2(0.5);
 	debug_view_flat = debug_view;
@@ -95,7 +124,7 @@ void main() {
 		return;
 	}
 
-	bool edge = (flags & 2u) != 0u;
+	bool edge = (flags & FLAG_DEBUG_EDGE) != 0u;
 	vec3 color = albedo.rgb;
 	if (debug_view == 1u) {
 		if (!edge) {
@@ -107,7 +136,7 @@ void main() {
 		float depth_luma = clamp(radial_depth / 32.0, 0.0, 1.0);
 		color = vec3(depth_luma);
 	} else if (debug_view == 3u) {
-		color = encoded_normal;
+		color = decode_probe_normal(encoded_normal) * 0.5 + 0.5;
 	} else if (debug_view == 4u) {
 		color = hash_color(object_id);
 	} else if (debug_view == 5u) {

@@ -134,6 +134,10 @@ void RenderGeometryInstanceBase::set_cast_double_sided_shadows(bool p_enable) {
 	_mark_dirty();
 }
 
+void RenderGeometryInstanceBase::set_texel_splatting_enabled(bool p_enable) {
+	texel_splatting_enabled = p_enable;
+}
+
 void RenderGeometryInstanceBase::reset_motion_vectors() {
 }
 

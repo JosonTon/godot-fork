@@ -958,9 +958,11 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	}
 
 	//fill list
+	const uint32_t texel_capture_layer_mask = texel_splatting_enabled ? uint32_t(int64_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/capture_layer_mask"))) : 0;
 
 	for (int i = 0; i < (int)p_render_data->instances->size(); i++) {
 		GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
+		const bool inst_matches_texel_capture_layers = texel_splatting_enabled && ((inst->layer_mask & p_render_data->scene_data->camera_visible_layers & texel_capture_layer_mask) != 0);
 
 		Vector3 center = inst->transform.origin;
 		if (p_render_data->scene_data->cam_orthogonal) {
@@ -1150,17 +1152,19 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					force_alpha = true;
 				}
 
-				if (!force_alpha && (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
+				const bool texel_splatting_replaces_surface = inst_matches_texel_capture_layers && inst->texel_splatting_enabled && !force_alpha && surf->texel_splatting_mode != RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE && !(surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA);
+
+				if (!texel_splatting_replaces_surface && !force_alpha && (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
 					rl->add_element(surf);
 				}
 
-				if (force_alpha || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) {
+				if (!texel_splatting_replaces_surface && (force_alpha || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA))) {
 					surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_TRANSPARENT;
 					render_list[RENDER_LIST_ALPHA].add_element(surf);
 					if (uses_gi) {
 						surf->sort.uses_forward_gi = 1;
 					}
-				} else if (p_using_motion_pass && (uses_motion || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR))) {
+				} else if (!texel_splatting_replaces_surface && p_using_motion_pass && (uses_motion || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR))) {
 					surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_MOTION_VECTORS;
 					render_list[RENDER_LIST_MOTION].add_element(surf);
 				} else {
@@ -1192,9 +1196,11 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					rl->add_element(surf);
 				}
 			} else if (p_pass_mode == PASS_MODE_DEPTH_MATERIAL || p_pass_mode == PASS_MODE_TEXEL_GBUFFER) {
-				if (p_pass_mode == PASS_MODE_TEXEL_GBUFFER && surf->texel_splatting_mode == RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE) {
-					surf = surf->next;
-					continue;
+				if (p_pass_mode == PASS_MODE_TEXEL_GBUFFER) {
+					if (!inst->texel_splatting_enabled || surf->texel_splatting_mode == RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) {
+						surf = surf->next;
+						continue;
+					}
 				}
 
 				if (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE | GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) {
@@ -2391,9 +2397,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	if (texel_splat_pre_transparent_draw_pending && !is_reflection_probe) {
 		RENDER_TIMESTAMP("Draw Texel Splats Pre Transparent");
-		_draw_texel_splats(p_render_data->render_buffers, &texel_splat_pre_transparent_camera_data, texel_splat_pre_transparent_probe_face_transforms, true);
+		_draw_texel_splats(p_render_data->render_buffers, &texel_splat_pre_transparent_camera_data, texel_splat_pre_transparent_probe_face_transforms, texel_splat_pre_transparent_active_layer_mask, true);
 		texel_splat_pre_transparent_draw_pending = false;
 		texel_splat_pre_transparent_probe_face_transforms.clear();
+		texel_splat_pre_transparent_active_layer_mask = 0;
 	}
 
 	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
@@ -3142,14 +3149,14 @@ void RenderForwardClustered::render_texel_splat_probe_gbuffer(const RendererScen
 	RD::get_singleton()->draw_command_end_label();
 }
 
-void RenderForwardClustered::process_texel_splat_probe_data() {
+void RenderForwardClustered::process_texel_splat_probe_data(uint32_t p_active_layer_mask) {
 	ERR_FAIL_COND(!is_texel_splatting_enabled());
 	ERR_FAIL_NULL(texel_splat_pipeline);
 
-	texel_splat_pipeline->process_probe_data();
+	texel_splat_pipeline->process_probe_data(p_active_layer_mask);
 }
 
-void RenderForwardClustered::queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) {
+void RenderForwardClustered::queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) {
 	ERR_FAIL_COND(!is_texel_splatting_enabled());
 	ERR_FAIL_NULL(texel_splat_pipeline);
 	ERR_FAIL_NULL(p_camera_data);
@@ -3161,14 +3168,15 @@ void RenderForwardClustered::queue_texel_splat_pre_transparent_draw(const Ref<Re
 
 	texel_splat_pre_transparent_camera_data = *p_camera_data;
 	texel_splat_pre_transparent_probe_face_transforms = p_probe_face_transforms;
+	texel_splat_pre_transparent_active_layer_mask = p_active_layer_mask;
 	texel_splat_pre_transparent_draw_pending = true;
 }
 
-void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) {
-	_draw_texel_splats(p_render_buffers, p_camera_data, p_probe_face_transforms, false);
+void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) {
+	_draw_texel_splats(p_render_buffers, p_camera_data, p_probe_face_transforms, p_active_layer_mask, false);
 }
 
-void RenderForwardClustered::_draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, bool p_pre_transparent) {
+void RenderForwardClustered::_draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask, bool p_pre_transparent) {
 	ERR_FAIL_COND(!is_texel_splatting_enabled());
 	ERR_FAIL_NULL(texel_splat_pipeline);
 	ERR_FAIL_NULL(p_camera_data);
@@ -3186,6 +3194,7 @@ void RenderForwardClustered::_draw_texel_splats(const Ref<RenderSceneBuffers> &p
 	Size2i draw_size = rb->get_internal_size();
 	RID depth_test_copy_framebuffer;
 	Size2i depth_test_copy_size;
+	texel_splat_pipeline->sync_project_settings();
 	if (p_pre_transparent) {
 		if (!rb->has_depth_texture()) {
 			WARN_PRINT_ONCE("Texel splatting pre-transparent draw requested, but the render buffer has no depth texture. Skipping texel splat draw.");
@@ -3217,7 +3226,8 @@ void RenderForwardClustered::_draw_texel_splats(const Ref<RenderSceneBuffers> &p
 	depth_correction.set_depth_correction(true);
 	Projection view_projection = (depth_correction * p_camera_data->main_projection) * Projection(p_camera_data->main_transform.affine_inverse());
 
-	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, draw_size, texel_splat_directional_light.direction, texel_splat_directional_light.color, texel_splat_directional_light.enabled);
+	const bool use_depth_test = p_pre_transparent || texel_splat_pipeline->is_draw_depth_test_enabled();
+	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, draw_size, p_camera_data->main_transform.origin, p_active_layer_mask, texel_splat_directional_light.direction, texel_splat_directional_light.color, texel_splat_directional_light.enabled, use_depth_test);
 
 	if (depth_test_copy_framebuffer.is_valid()) {
 		copy_effects->copy_to_fb_rect(rb->get_internal_texture(), depth_test_copy_framebuffer, Rect2(Vector2(), depth_test_copy_size), false, false);

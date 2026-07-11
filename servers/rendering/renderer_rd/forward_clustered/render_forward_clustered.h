@@ -99,8 +99,9 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	bool texel_splat_pre_transparent_draw_pending = false;
 	CameraData texel_splat_pre_transparent_camera_data;
 	Vector<Transform3D> texel_splat_pre_transparent_probe_face_transforms;
+	uint32_t texel_splat_pre_transparent_active_layer_mask = 0;
 
-	void _draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, bool p_pre_transparent);
+	void _draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask, bool p_pre_transparent);
 
 public:
 	/* Framebuffer */
@@ -839,9 +840,9 @@ public:
 	virtual bool is_texel_splatting_enabled() const override;
 	virtual uint32_t get_texel_splatting_probe_count() const override;
 	virtual void render_texel_splat_probe_gbuffer(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) override;
-	virtual void process_texel_splat_probe_data() override;
-	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) override;
-	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms) override;
+	virtual void process_texel_splat_probe_data(uint32_t p_active_layer_mask) override;
+	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) override;
+	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) override;
 
 	/* callback from updating our lighting UBOs, used to populate cluster builder */
 	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) override;

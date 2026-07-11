@@ -739,6 +739,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+				geom->geometry_instance->set_texel_splatting_enabled(instance->texel_splatting_enabled);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1322,6 +1323,12 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 				} else {
 					idata.flags &= ~InstanceData::FLAG_TEXEL_SPLATTING_ENABLED;
 				}
+			}
+
+			if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
+				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+				ERR_FAIL_NULL(geom->geometry_instance);
+				geom->geometry_instance->set_texel_splatting_enabled(p_enabled);
 			}
 		} break;
 		default: {
@@ -3781,6 +3788,23 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 	const uint32_t face_count = 6;
 	Vector<Transform3D> probe_face_transforms;
 	probe_face_transforms.resize(probe_count * face_count);
+	uint32_t active_layer_mask = 0;
+	float best_face_dot = -2.0f;
+	uint32_t best_face = 5;
+	const float eye_face_cull_dot = Math::cos(Math::deg_to_rad(103.0f));
+	for (uint32_t face = 0; face < face_count; face++) {
+		const float face_dot = view_normals[face].dot(forward);
+		if (face_dot > best_face_dot) {
+			best_face_dot = face_dot;
+			best_face = face;
+		}
+		if (face_dot >= eye_face_cull_dot) {
+			active_layer_mask |= 1u << face;
+		}
+	}
+	if (active_layer_mask == 0) {
+		active_layer_mask = 1u << best_face;
+	}
 
 	for (uint32_t probe = 0; probe < probe_count; probe++) {
 		Transform3D probe_transform;
@@ -3796,6 +3820,9 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 			const uint32_t layer = probe * face_count + face;
 			Transform3D probe_face_transform = probe_transform * local_view;
 			probe_face_transforms.write[layer] = probe_face_transform;
+			if ((active_layer_mask & (1u << layer)) == 0) {
+				continue;
+			}
 
 			RendererSceneRender::CameraData camera_data;
 			camera_data.set_camera(probe_face_transform, cm, false, false, Vector2(), 0.0f, texel_visible_layers);
@@ -3806,8 +3833,8 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 	}
 
 	RENDER_TIMESTAMP("Process Texel Probe Data");
-	scene_render->process_texel_splat_probe_data();
-	scene_render->queue_texel_splat_pre_transparent_draw(p_render_buffers, p_camera_data, probe_face_transforms);
+	scene_render->process_texel_splat_probe_data(active_layer_mask);
+	scene_render->queue_texel_splat_pre_transparent_draw(p_render_buffers, p_camera_data, probe_face_transforms, active_layer_mask);
 }
 
 RID RendererSceneCull::_render_get_environment(RID p_camera, RID p_scenario) {

@@ -43,7 +43,10 @@ namespace RendererSceneRenderImplementation {
 
 class TexelSplatPipelineRD {
 	static const uint32_t PROBE_SIZE = 384;
-	static const uint32_t PROBE_COUNT = 3;
+	// The current eye-probe MVP captures one cubemap at the main camera.
+	// Additional grid/history probes require their own activation policy before
+	// they can be exposed as active runtime layers.
+	static const uint32_t PROBE_COUNT = 1;
 	static const uint32_t PROBE_FACE_COUNT = 6;
 	static const uint32_t PROBE_LAYER_COUNT = PROBE_COUNT * PROBE_FACE_COUNT;
 
@@ -76,7 +79,7 @@ class TexelSplatPipelineRD {
 		uint32_t probe_size = 0;
 		uint32_t layer_count = 0;
 		uint32_t max_visible_refs = 0;
-		uint32_t pad = 0;
+		uint32_t active_layer_mask = 0;
 	};
 
 	struct CounterData {
@@ -87,7 +90,7 @@ class TexelSplatPipelineRD {
 		uint32_t cross_face_resolved_count = 0;
 		uint32_t cross_face_empty_suppressed_count = 0;
 		uint32_t cross_face_edge_count = 0;
-		uint32_t pad = 0;
+		uint32_t cross_object_continuity_count = 0;
 	};
 
 	struct DrawIndirectArgs {
@@ -104,6 +107,7 @@ class TexelSplatPipelineRD {
 		float debug_params[4] = {};
 		float directional_light_direction[4] = {};
 		float directional_light_color[4] = {};
+		float camera_position[4] = {};
 	};
 
 	enum DebugView {
@@ -126,7 +130,8 @@ class TexelSplatPipelineRD {
 	RID process_shader_rd;
 	RID draw_shader_rd;
 	RID process_pipeline;
-	PipelineCacheRD draw_pipeline;
+	PipelineCacheRD draw_pipeline_no_depth;
+	PipelineCacheRD draw_pipeline_depth_test;
 	RID process_uniform_set;
 	RID draw_uniform_set;
 	RID visible_refs_buffer;
@@ -162,8 +167,9 @@ class TexelSplatPipelineRD {
 public:
 	bool initialize();
 	void free();
-	void process_probe_data();
-	void draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled);
+	void sync_project_settings();
+	void process_probe_data(uint32_t p_active_layer_mask);
+	void draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_camera_position, uint32_t p_active_layer_mask, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled, bool p_depth_test_enabled);
 	bool is_initialized() const { return initialized; }
 	uint32_t get_probe_size() const { return PROBE_SIZE; }
 	uint32_t get_probe_count() const { return PROBE_COUNT; }

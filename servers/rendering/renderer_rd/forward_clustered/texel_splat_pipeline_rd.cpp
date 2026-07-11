@@ -82,10 +82,16 @@ void TexelSplatPipelineRD::free() {
 	initialized = false;
 }
 
-void TexelSplatPipelineRD::process_probe_data() {
+void TexelSplatPipelineRD::sync_project_settings() {
+	_load_project_settings();
+}
+
+void TexelSplatPipelineRD::process_probe_data(uint32_t p_active_layer_mask) {
 	ERR_FAIL_COND(!initialized);
 	ERR_FAIL_COND(process_pipeline.is_null());
 	ERR_FAIL_COND(process_uniform_set.is_null());
+
+	_load_project_settings();
 
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL(rd);
@@ -101,6 +107,7 @@ void TexelSplatPipelineRD::process_probe_data() {
 	push_constant.probe_size = PROBE_SIZE;
 	push_constant.layer_count = PROBE_LAYER_COUNT;
 	push_constant.max_visible_refs = texel_capacity;
+	push_constant.active_layer_mask = p_active_layer_mask;
 
 	RD::ComputeListID compute_list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(compute_list, process_pipeline);
@@ -115,12 +122,14 @@ void TexelSplatPipelineRD::process_probe_data() {
 	rd->draw_command_end_label();
 }
 
-void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled) {
+void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_camera_position, uint32_t p_active_layer_mask, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled, bool p_depth_test_enabled) {
 	ERR_FAIL_COND(!initialized);
 	ERR_FAIL_COND(p_framebuffer.is_null());
 	ERR_FAIL_COND(draw_uniform_set.is_null());
 	ERR_FAIL_COND(draw_args_buffer.is_null());
 	ERR_FAIL_COND(p_probe_transforms.size() != PROBE_LAYER_COUNT);
+
+	_load_project_settings();
 
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL(rd);
@@ -147,12 +156,17 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 	draw_state.directional_light_color[1] = p_directional_light_color.g;
 	draw_state.directional_light_color[2] = p_directional_light_color.b;
 	draw_state.directional_light_color[3] = 0.15f;
+	draw_state.camera_position[0] = p_camera_position.x;
+	draw_state.camera_position[1] = p_camera_position.y;
+	draw_state.camera_position[2] = p_camera_position.z;
+	draw_state.camera_position[3] = float(p_active_layer_mask);
 
 	ERR_FAIL_COND(rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &draw_state) != OK);
 
 	rd->draw_command_begin_label("Draw Texel Splats");
 
 	RD::DrawListID draw_list = rd->draw_list_begin(p_framebuffer);
+	PipelineCacheRD &draw_pipeline = p_depth_test_enabled ? draw_pipeline_depth_test : draw_pipeline_no_depth;
 	RID pipeline = draw_pipeline.get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(p_framebuffer));
 	rd->draw_list_bind_render_pipeline(draw_list, pipeline);
 	rd->draw_list_bind_uniform_set(draw_list, draw_uniform_set, 0);
@@ -191,6 +205,7 @@ void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
 	memcpy(&draw_args, draw_args_data.ptr(), sizeof(DrawIndirectArgs));
 
 	print_line("TexelSplat counters frame=" + String::num_uint64(debug_frame_index) +
+			" debug_probe_layer=" + itos(debug_probe_layer) +
 			" visible=" + String::num_uint64(counters.visible_count) +
 			" classified=" + String::num_uint64(counters.classified_count) +
 			" edge=" + String::num_uint64(counters.edge_count) +
@@ -198,6 +213,7 @@ void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
 			" cross_face_resolved=" + String::num_uint64(counters.cross_face_resolved_count) +
 			" cross_face_empty_suppressed=" + String::num_uint64(counters.cross_face_empty_suppressed_count) +
 			" cross_face_edges=" + String::num_uint64(counters.cross_face_edge_count) +
+			" cross_object_continuous=" + String::num_uint64(counters.cross_object_continuity_count) +
 			" draw_instances=" + String::num_uint64(draw_args.instance_count) +
 			" capacity=" + String::num_uint64(texel_capacity));
 }
@@ -357,14 +373,23 @@ bool TexelSplatPipelineRD::_create_draw_resources() {
 	RD::PipelineRasterizationState rasterization_state;
 	rasterization_state.cull_mode = RD::POLYGON_CULL_DISABLED;
 
-	RD::PipelineDepthStencilState depth_stencil_state;
-	if (draw_depth_test_enabled) {
-		depth_stencil_state.enable_depth_test = true;
-		depth_stencil_state.enable_depth_write = true;
-		depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
-	}
+	RD::PipelineDepthStencilState no_depth_state;
 
-	draw_pipeline.setup(
+	draw_pipeline_no_depth.setup(
+			draw_shader_rd,
+			RD::RENDER_PRIMITIVE_TRIANGLES,
+			rasterization_state,
+			RD::PipelineMultisampleState(),
+			no_depth_state,
+			RD::PipelineColorBlendState::create_blend(),
+			0);
+
+	RD::PipelineDepthStencilState depth_stencil_state;
+	depth_stencil_state.enable_depth_test = true;
+	depth_stencil_state.enable_depth_write = true;
+	depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+
+	draw_pipeline_depth_test.setup(
 			draw_shader_rd,
 			RD::RENDER_PRIMITIVE_TRIANGLES,
 			rasterization_state,
@@ -522,7 +547,8 @@ void TexelSplatPipelineRD::_free_draw_resources() {
 	}
 	draw_uniform_set = RID();
 
-	draw_pipeline.clear();
+	draw_pipeline_no_depth.clear();
+	draw_pipeline_depth_test.clear();
 
 	if (draw_state_buffer.is_valid()) {
 		rd->free_rid(draw_state_buffer);
