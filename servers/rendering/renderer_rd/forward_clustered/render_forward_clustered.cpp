@@ -111,6 +111,8 @@ bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_mfx_tempor
 #endif
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
+	reset_texel_splat_pipeline();
+
 	// JIC, should already have been cleared
 	if (render_buffers) {
 		render_buffers->clear_context(RB_SCOPE_FORWARD_CLUSTERED);
@@ -140,6 +142,29 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 	if (!render_sdfgi_uniform_set.is_null() && RD::get_singleton()->uniform_set_is_valid(render_sdfgi_uniform_set)) {
 		RD::get_singleton()->free_rid(render_sdfgi_uniform_set);
 	}
+}
+
+void RenderForwardClustered::RenderBufferDataForwardClustered::reset_texel_splat_pipeline() {
+	if (texel_splat_pipeline != nullptr) {
+		memdelete(texel_splat_pipeline);
+		texel_splat_pipeline = nullptr;
+	}
+	texel_splat_pipeline_initialization_attempted = false;
+	texel_splat_pre_transparent_draw_pending = false;
+	texel_splat_view_state = TexelSplatViewState();
+}
+
+TexelSplatPipelineRD *RenderForwardClustered::RenderBufferDataForwardClustered::ensure_texel_splat_pipeline() {
+	if (texel_splat_pipeline == nullptr && !texel_splat_pipeline_initialization_attempted) {
+		texel_splat_pipeline_initialization_attempted = true;
+		texel_splat_pipeline = memnew(TexelSplatPipelineRD);
+		if (!texel_splat_pipeline->initialize()) {
+			memdelete(texel_splat_pipeline);
+			texel_splat_pipeline = nullptr;
+			WARN_PRINT_ONCE("Texel splatting was requested, but per-viewport probe resources could not be initialized.");
+		}
+	}
+	return texel_splat_pipeline;
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::configure(RenderSceneBuffersRD *p_render_buffers) {
@@ -396,7 +421,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 		// Determine the cull variant.
 		SceneShaderForwardClustered::ShaderData::CullVariant cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_MAX;
-		if constexpr (p_pass_mode == PASS_MODE_DEPTH_MATERIAL || p_pass_mode == PASS_MODE_TEXEL_GBUFFER || p_pass_mode == PASS_MODE_SDF) {
+		if constexpr (p_pass_mode == PASS_MODE_DEPTH_MATERIAL || p_pass_mode == PASS_MODE_SDF) {
 			cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
 		} else {
 			if constexpr (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
@@ -930,6 +955,11 @@ _FORCE_INLINE_ static uint32_t _indices_to_primitives(RSE::PrimitiveType p_primi
 void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi, bool p_using_opaque_gi, bool p_using_motion_pass, bool p_append) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	uint64_t frame = RSG::rasterizer->get_frame_number();
+	bool texel_splatting_replacement_active = false;
+	if (p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		Ref<RenderBufferDataForwardClustered> rb_data = p_render_data->render_buffers->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+		texel_splatting_replacement_active = rb_data.is_valid() && rb_data->texel_splat_pre_transparent_draw_pending;
+	}
 
 	if (p_render_list == RENDER_LIST_OPAQUE) {
 		scene_state.used_sss = false;
@@ -1152,7 +1182,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					force_alpha = true;
 				}
 
-				const bool texel_splatting_replaces_surface = inst_matches_texel_capture_layers && inst->texel_splatting_enabled && !force_alpha && surf->texel_splatting_mode != RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE && !(surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA);
+				const bool texel_splatting_replaces_surface = texel_splatting_replacement_active && p_render_data->reflection_probe.is_null() && inst_matches_texel_capture_layers && inst->texel_splatting_enabled && !force_alpha && surf->texel_splatting_mode != RSE::MATERIAL_TEXEL_SPLATTING_FORCE_DISABLE && !(surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA);
 
 				if (!texel_splatting_replaces_surface && !force_alpha && (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
 					rl->add_element(surf);
@@ -2395,12 +2425,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		rb->ensure_upscaled();
 	}
 
-	if (texel_splat_pre_transparent_draw_pending && !is_reflection_probe) {
-		RENDER_TIMESTAMP("Draw Texel Splats Pre Transparent");
-		_draw_texel_splats(p_render_data->render_buffers, &texel_splat_pre_transparent_camera_data, texel_splat_pre_transparent_probe_face_transforms, texel_splat_pre_transparent_active_layer_mask, true);
-		texel_splat_pre_transparent_draw_pending = false;
-		texel_splat_pre_transparent_probe_face_transforms.clear();
-		texel_splat_pre_transparent_active_layer_mask = 0;
+	if (rb_data.is_valid() && rb_data->texel_splat_pre_transparent_draw_pending && !is_reflection_probe) {
+		_draw_prepared_texel_splats(p_render_data->render_buffers);
+		rb_data->texel_splat_pre_transparent_draw_pending = false;
 	}
 
 	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
@@ -3057,7 +3084,7 @@ void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform
 }
 
 bool RenderForwardClustered::is_texel_splatting_enabled() const {
-	return texel_splatting_enabled && texel_splat_pipeline != nullptr && texel_splat_pipeline->is_initialized();
+	return texel_splatting_enabled;
 }
 
 uint32_t RenderForwardClustered::get_texel_splatting_probe_count() const {
@@ -3065,14 +3092,199 @@ uint32_t RenderForwardClustered::get_texel_splatting_probe_count() const {
 		return 0;
 	}
 
-	return texel_splat_pipeline->get_probe_count();
+	return TexelSplatPipelineRD::get_static_probe_count();
 }
 
-void RenderForwardClustered::render_texel_splat_probe_gbuffer(const RendererSceneRender::CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) {
+bool RenderForwardClustered::prepare_texel_splat_probe_frame(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, RID p_scenario, uint32_t p_visible_layers, TexelSplatProbeFramePlan &r_frame_plan) {
+	ERR_FAIL_COND_V(!is_texel_splatting_enabled(), false);
+	ERR_FAIL_NULL_V(p_camera_data, false);
+	ERR_FAIL_COND_V(p_camera_data->view_count != 1, false);
+
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), false);
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	ERR_FAIL_COND_V(rb_data.is_null(), false);
+	rb_data->texel_splat_pre_transparent_draw_pending = false;
+	if (rb_data->texel_splat_pipeline != nullptr) {
+		rb_data->texel_splat_pipeline->discard_prepared_resolve_and_composite();
+	}
+	// Phase 1B reconstructs rays from a single camera origin and is therefore
+	// perspective-only. Keep orthographic viewports on normal Forward+ until a
+	// per-pixel orthographic ray origin and matching probe model are implemented.
+	if (p_camera_data->is_orthogonal) {
+		return false;
+	}
+	// The Stage 5 splat draw pipeline is single-sampled. Replacing the Forward+
+	// surface under MSAA would let the later MSAA resolve overwrite the splats.
+	if (rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
+		return false;
+	}
+	TexelSplatPipelineRD *texel_splat_pipeline = rb_data->ensure_texel_splat_pipeline();
+	if (texel_splat_pipeline == nullptr) {
+		return false;
+	}
+	const uint32_t requested_probe_size = TexelSplatPipelineRD::normalize_probe_size(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/probe_size")));
+	if (texel_splat_pipeline->get_probe_size() != requested_probe_size) {
+		// probe_size owns texture and storage-buffer dimensions. Recreate only
+		// this render buffer's TS resources before capture starts; Forward+
+		// custom data and the rest of the viewport remain untouched.
+		rb_data->reset_texel_splat_pipeline();
+		texel_splat_pipeline = rb_data->ensure_texel_splat_pipeline();
+		if (texel_splat_pipeline == nullptr) {
+			return false;
+		}
+	}
+
+	RenderBufferDataForwardClustered::TexelSplatViewState &state = rb_data->texel_splat_view_state;
+	const float grid_step = MAX(0.01f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/grid_step")));
+	const float velocity_tau = MAX(0.001f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/transition_velocity_tau")));
+	const float transition_seconds = MAX(0.001f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/transition_seconds")));
+	const float camera_cut_distance = MAX(grid_step, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/camera_cut_distance")));
+	const uint32_t capture_layer_mask = uint32_t(int64_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/capture_layer_mask")));
+	const uint32_t face_coverage_mode = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/face_coverage_mode")), 0, 1));
+	const Vector3 camera_position = p_camera_data->main_transform.origin;
+	const Vector3 camera_forward = -p_camera_data->main_transform.basis.get_column(Vector3::AXIS_Z).normalized();
+	const Vector3 snapped_origin(
+			Math::round(camera_position.x / grid_step) * grid_step,
+			Math::round(camera_position.y / grid_step) * grid_step,
+			Math::round(camera_position.z / grid_step) * grid_step);
+
+	auto reset_state = [&]() {
+		state = RenderBufferDataForwardClustered::TexelSplatViewState();
+		state.initialized = true;
+		state.scenario = p_scenario;
+		state.visible_layers = p_visible_layers;
+		state.capture_layer_mask = capture_layer_mask;
+		state.face_coverage_mode = face_coverage_mode;
+		state.grid_step = grid_step;
+		state.probe_far = p_camera_data->main_projection.get_z_far();
+		state.last_camera_position = camera_position;
+		state.last_camera_forward = camera_forward;
+		state.probe_origins[0] = camera_position;
+		state.probe_origins[state.current_probe_index] = snapped_origin;
+		state.probe_origins[state.previous_probe_index] = snapped_origin;
+		state.generation++;
+	};
+
+	const bool camera_cut = state.initialized && (camera_position.distance_to(state.last_camera_position) > camera_cut_distance || camera_forward.dot(state.last_camera_forward) < -0.5f);
+	const bool ownership_changed = state.initialized && (state.scenario != p_scenario || state.visible_layers != p_visible_layers || state.capture_layer_mask != capture_layer_mask || state.face_coverage_mode != face_coverage_mode || !Math::is_equal_approx(state.grid_step, grid_step) || !Math::is_equal_approx(state.probe_far, p_camera_data->main_projection.get_z_far()));
+	if (!state.initialized || camera_cut || ownership_changed) {
+		reset_state();
+	} else {
+		const float dt = CLAMP(float(time_step > 0.0 ? time_step : (1.0 / 60.0)), 0.0001f, 0.1f);
+		const float speed = camera_position.distance_to(state.last_camera_position) / dt;
+		const float velocity_alpha = 1.0f - Math::exp(-dt / velocity_tau);
+		state.smoothed_speed = Math::lerp(state.smoothed_speed, speed, velocity_alpha);
+		if (state.transitioning) {
+			state.transition_fade = MIN(1.0f, state.transition_fade + dt / transition_seconds);
+			if (state.transition_fade >= 1.0f) {
+				state.transition_fade = 1.0f;
+				state.transitioning = false;
+			}
+		}
+
+		if (!snapped_origin.is_equal_approx(state.probe_origins[state.current_probe_index])) {
+			const uint32_t all_face_mask = (1u << TexelSplatPipelineRD::get_static_probe_face_count()) - 1u;
+			const uint32_t old_current_probe_index = state.current_probe_index;
+			const uint32_t old_previous_probe_index = state.previous_probe_index;
+			const bool previous_matches_target = snapped_origin.is_equal_approx(state.probe_origins[old_previous_probe_index]) && state.valid_face_masks[old_previous_probe_index] == all_face_mask;
+			if (previous_matches_target) {
+				// A/B/A motion can reuse the retained A slot without recapture. The
+				// old Current becomes Previous so the transition remains continuous.
+				state.current_probe_index = old_previous_probe_index;
+				state.previous_probe_index = old_current_probe_index;
+				state.transition_fade = 0.0f;
+				state.transitioning = state.valid_face_masks[state.previous_probe_index] == all_face_mask;
+				state.transition_pending = false;
+			} else {
+				const bool current_complete = state.valid_face_masks[old_current_probe_index] == all_face_mask;
+				if (current_complete) {
+					state.previous_probe_index = old_current_probe_index;
+					state.current_probe_index = old_current_probe_index == 1 ? 2 : 1;
+				}
+				// If a capture was interrupted, retarget the same incomplete Current
+				// slot and keep the last complete Previous slot alive.
+				state.probe_origins[state.current_probe_index] = snapped_origin;
+				state.valid_face_masks[state.current_probe_index] = 0;
+				state.transition_pending = state.valid_face_masks[state.previous_probe_index] == all_face_mask;
+				state.transition_fade = state.transition_pending ? 0.0f : 1.0f;
+				state.transitioning = false;
+			}
+			state.schedule_frame = 0;
+			state.generation++;
+		}
+	}
+
+	state.probe_origins[0] = camera_position;
+	state.valid_face_masks[0] = 0;
+
+	const uint32_t all_face_mask = (1u << TexelSplatPipelineRD::get_static_probe_face_count()) - 1u;
+	const uint32_t eye_face_mask = all_face_mask;
+	r_frame_plan = TexelSplatProbeFramePlan();
+	for (uint32_t probe = 0; probe < 3; probe++) {
+		r_frame_plan.probe_origins[probe] = state.probe_origins[probe];
+	}
+	r_frame_plan.capture_face_masks[0] = eye_face_mask;
+	r_frame_plan.draw_face_masks[0] = eye_face_mask;
+	const uint32_t current_capture_face_mask = all_face_mask & ~state.valid_face_masks[state.current_probe_index];
+	r_frame_plan.capture_face_masks[state.current_probe_index] = current_capture_face_mask;
+	r_frame_plan.draw_face_masks[state.current_probe_index] = all_face_mask;
+	const uint32_t current_layer_mask = all_face_mask << (state.current_probe_index * TexelSplatPipelineRD::get_static_probe_face_count());
+	const float transition_fade_override = float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/transition_fade_override"));
+	const bool debug_transition_forced = transition_fade_override >= 0.0f && state.valid_face_masks[state.previous_probe_index] == all_face_mask;
+	const bool draw_previous = state.transitioning || state.transition_pending || debug_transition_forced;
+	const uint32_t previous_face_mask = draw_previous ? state.valid_face_masks[state.previous_probe_index] : 0u;
+	const uint32_t previous_layer_mask = previous_face_mask << (state.previous_probe_index * TexelSplatPipelineRD::get_static_probe_face_count());
+	r_frame_plan.draw_face_masks[state.previous_probe_index] = previous_face_mask;
+	r_frame_plan.capture_layer_mask = eye_face_mask | (current_capture_face_mask << (state.current_probe_index * TexelSplatPipelineRD::get_static_probe_face_count()));
+	r_frame_plan.draw_layer_mask = eye_face_mask | current_layer_mask | previous_layer_mask;
+	r_frame_plan.current_probe_index = state.current_probe_index;
+	r_frame_plan.previous_probe_index = state.previous_probe_index;
+	r_frame_plan.grid_step = grid_step;
+	r_frame_plan.transition_fade = transition_fade_override >= 0.0f ? CLAMP(transition_fade_override, 0.0f, 1.0f) : state.transition_fade;
+	r_frame_plan.transitioning = state.transitioning || debug_transition_forced;
+	r_frame_plan.generation = state.generation;
+	if (bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters"))) {
+		const uint32_t log_interval = MAX(1u, uint32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counter_interval_frames")));
+		if (state.schedule_frame % log_interval == 0) {
+			const Vector3 &current_origin = state.probe_origins[state.current_probe_index];
+			const Vector3 &previous_origin = state.probe_origins[state.previous_probe_index];
+			print_line("TexelSplat frame_plan frame=" + String::num_uint64(state.schedule_frame) +
+					" phase=Stage5-Phase2-ComplementaryTransition" +
+					" source=GridDitherEyeFallback" +
+					" generation=" + String::num_uint64(state.generation) +
+					" current=" + itos(state.current_probe_index) +
+					" previous=" + itos(state.previous_probe_index) +
+					" transitioning=" + (r_frame_plan.transitioning ? String("true") : String("false")) +
+					" pending=" + (state.transition_pending ? String("true") : String("false")) +
+					" fade=" + String::num(r_frame_plan.transition_fade, 4) +
+					" capture_layers=" + String::num_uint64(r_frame_plan.capture_layer_mask) +
+					" draw_layers=" + String::num_uint64(r_frame_plan.draw_layer_mask) +
+					" current_origin=(" + String::num(current_origin.x, 3) + "," + String::num(current_origin.y, 3) + "," + String::num(current_origin.z, 3) + ")" +
+					" previous_origin=(" + String::num(previous_origin.x, 3) + "," + String::num(previous_origin.y, 3) + "," + String::num(previous_origin.z, 3) + ")");
+		}
+	}
+
+	state.last_camera_position = camera_position;
+	state.last_camera_forward = camera_forward;
+	state.schedule_frame++;
+	return r_frame_plan.capture_layer_mask != 0 && r_frame_plan.draw_layer_mask != 0;
+}
+
+void RenderForwardClustered::render_texel_splat_probe_gbuffer(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) {
 	ERR_FAIL_NULL(p_camera_data);
 	ERR_FAIL_COND(!is_texel_splatting_enabled());
 	ERR_FAIL_COND_MSG(p_camera_data->view_count != 1, "Texel splatting probe G-buffer capture does not support multiview cameras.");
-	ERR_FAIL_UNSIGNED_INDEX(p_probe_layer, texel_splat_pipeline->get_probe_layer_count());
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	if (rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
+		return;
+	}
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	ERR_FAIL_COND(rb_data.is_null());
+	TexelSplatPipelineRD *texel_splat_pipeline = rb_data->ensure_texel_splat_pipeline();
+	ERR_FAIL_NULL(texel_splat_pipeline);
+	ERR_FAIL_UNSIGNED_INDEX(p_probe_layer, TexelSplatPipelineRD::get_static_probe_layer_count());
 
 	RID framebuffer = texel_splat_pipeline->get_probe_layer_framebuffer(p_probe_layer);
 	ERR_FAIL_COND(framebuffer.is_null());
@@ -3143,95 +3355,150 @@ void RenderForwardClustered::render_texel_splat_probe_gbuffer(const RendererScen
 	clear.push_back(Color(0, 0, 0, 0)); // Object id.
 
 	RENDER_TIMESTAMP("Render Texel Probe G-buffer");
-	RenderListParameters render_list_params(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].element_info.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), true, pass_mode, 0, true, false, rp_uniform_set, false, Vector2(), scene_data.lod_distance_multiplier, scene_data.screen_mesh_lod_threshold);
+	// This is an offscreen material-style pass without scene_data.flip_y, so its
+	// framebuffer winding is inverted relative to the main Forward+ pass.
+	const bool reverse_cull = scene_data.cam_transform.basis.determinant() >= 0.0f;
+	RenderListParameters render_list_params(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].element_info.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), reverse_cull, pass_mode, 0, true, false, rp_uniform_set, false, Vector2(), scene_data.lod_distance_multiplier, scene_data.screen_mesh_lod_threshold);
 	_render_list_with_draw_list(&render_list_params, framebuffer, RD::DRAW_CLEAR_ALL, clear);
 
 	RD::get_singleton()->draw_command_end_label();
 }
 
-void RenderForwardClustered::process_texel_splat_probe_data(uint32_t p_active_layer_mask) {
-	ERR_FAIL_COND(!is_texel_splatting_enabled());
-	ERR_FAIL_NULL(texel_splat_pipeline);
+bool RenderForwardClustered::process_texel_splat_probe_data(const Ref<RenderSceneBuffers> &p_render_buffers, uint32_t p_capture_layer_mask, uint32_t p_active_layer_mask) {
+	ERR_FAIL_COND_V(!is_texel_splatting_enabled(), false);
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), false);
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	ERR_FAIL_COND_V(rb_data.is_null(), false);
+	TexelSplatPipelineRD *texel_splat_pipeline = rb_data->ensure_texel_splat_pipeline();
+	ERR_FAIL_NULL_V(texel_splat_pipeline, false);
 
-	texel_splat_pipeline->process_probe_data(p_active_layer_mask);
+	if (!texel_splat_pipeline->process_probe_data(p_active_layer_mask)) {
+		return false;
+	}
+
+	RenderBufferDataForwardClustered::TexelSplatViewState &state = rb_data->texel_splat_view_state;
+	const uint32_t face_mask = (1u << TexelSplatPipelineRD::get_static_probe_face_count()) - 1u;
+	for (uint32_t probe = 0; probe < TexelSplatPipelineRD::get_static_probe_count(); probe++) {
+		const uint32_t captured_faces = (p_capture_layer_mask >> (probe * TexelSplatPipelineRD::get_static_probe_face_count())) & face_mask;
+		state.valid_face_masks[probe] |= captured_faces;
+	}
+	if (state.transition_pending && state.valid_face_masks[state.current_probe_index] == face_mask) {
+		state.transition_pending = false;
+		if (state.valid_face_masks[state.previous_probe_index] == face_mask) {
+			state.transition_fade = 0.0f;
+			state.transitioning = true;
+		} else {
+			state.transition_fade = 1.0f;
+			state.transitioning = false;
+		}
+	}
+	return true;
 }
 
-void RenderForwardClustered::queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) {
+void RenderForwardClustered::queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const TexelSplatProbeFramePlan &p_frame_plan) {
 	ERR_FAIL_COND(!is_texel_splatting_enabled());
-	ERR_FAIL_NULL(texel_splat_pipeline);
 	ERR_FAIL_NULL(p_camera_data);
 	ERR_FAIL_COND(p_render_buffers.is_null());
 
 	if (p_camera_data->view_count != 1) {
 		return;
 	}
-
-	texel_splat_pre_transparent_camera_data = *p_camera_data;
-	texel_splat_pre_transparent_probe_face_transforms = p_probe_face_transforms;
-	texel_splat_pre_transparent_active_layer_mask = p_active_layer_mask;
-	texel_splat_pre_transparent_draw_pending = true;
-}
-
-void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) {
-	_draw_texel_splats(p_render_buffers, p_camera_data, p_probe_face_transforms, p_active_layer_mask, false);
-}
-
-void RenderForwardClustered::_draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask, bool p_pre_transparent) {
-	ERR_FAIL_COND(!is_texel_splatting_enabled());
-	ERR_FAIL_NULL(texel_splat_pipeline);
-	ERR_FAIL_NULL(p_camera_data);
-
-	if (p_camera_data->view_count != 1) {
+	if (p_camera_data->is_orthogonal) {
 		return;
 	}
 
 	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
 	ERR_FAIL_COND(rb.is_null());
-	ERR_FAIL_COND(!rb->has_internal_texture());
-
-	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
-	RID framebuffer;
-	Size2i draw_size = rb->get_internal_size();
-	RID depth_test_copy_framebuffer;
-	Size2i depth_test_copy_size;
-	texel_splat_pipeline->sync_project_settings();
-	if (p_pre_transparent) {
-		if (!rb->has_depth_texture()) {
-			WARN_PRINT_ONCE("Texel splatting pre-transparent draw requested, but the render buffer has no depth texture. Skipping texel splat draw.");
-			return;
-		}
-		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture(), rb->get_depth_texture());
-	} else if (texel_splat_pipeline->is_draw_depth_test_enabled()) {
-		if (!rb->has_depth_texture()) {
-			WARN_PRINT_ONCE("Texel splatting depth test requested, but the render buffer has no depth texture. Skipping texel splat draw.");
-			return;
-		}
-		framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture(), rb->get_depth_texture());
-		if (texture_storage != nullptr && rb->get_render_target().is_valid()) {
-			depth_test_copy_framebuffer = texture_storage->render_target_get_rd_framebuffer(rb->get_render_target());
-			depth_test_copy_size = rb->get_target_size();
-		}
-	} else {
-		if (texture_storage != nullptr && rb->get_render_target().is_valid()) {
-			framebuffer = texture_storage->render_target_get_rd_framebuffer(rb->get_render_target());
-			draw_size = rb->get_target_size();
-		}
-		if (framebuffer.is_null()) {
-			framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture());
-		}
+	if (rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
+		return;
 	}
-	ERR_FAIL_COND(framebuffer.is_null());
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	ERR_FAIL_COND(rb_data.is_null());
+	TexelSplatPipelineRD *texel_splat_pipeline = rb_data->ensure_texel_splat_pipeline();
+	ERR_FAIL_NULL(texel_splat_pipeline);
+	const uint32_t eye_layer_mask = (1u << TexelSplatPipelineRD::get_static_probe_face_count()) - 1u;
+	RenderBufferDataForwardClustered::TexelSplatViewState &state = rb_data->texel_splat_view_state;
+	ERR_FAIL_UNSIGNED_INDEX(state.current_probe_index, TexelSplatPipelineRD::get_static_probe_count());
+	ERR_FAIL_UNSIGNED_INDEX(state.previous_probe_index, TexelSplatPipelineRD::get_static_probe_count());
+	TexelSplatProbeFramePlan final_frame_plan = p_frame_plan;
+	final_frame_plan.current_probe_index = state.current_probe_index;
+	final_frame_plan.previous_probe_index = state.previous_probe_index;
+	final_frame_plan.draw_face_masks[0] = state.valid_face_masks[0] & eye_layer_mask;
+	final_frame_plan.draw_face_masks[state.current_probe_index] = state.valid_face_masks[state.current_probe_index] & eye_layer_mask;
+	const float transition_fade_override = float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/transition_fade_override"));
+	const bool debug_transition_forced = transition_fade_override >= 0.0f && state.valid_face_masks[state.previous_probe_index] == eye_layer_mask;
+	final_frame_plan.transitioning = state.transitioning || debug_transition_forced;
+	final_frame_plan.transition_fade = transition_fade_override >= 0.0f ? CLAMP(transition_fade_override, 0.0f, 1.0f) : state.transition_fade;
+	final_frame_plan.draw_face_masks[state.previous_probe_index] = final_frame_plan.transitioning ? (state.valid_face_masks[state.previous_probe_index] & eye_layer_mask) : 0u;
+	const uint32_t current_layer_mask = final_frame_plan.draw_face_masks[state.current_probe_index] << (state.current_probe_index * TexelSplatPipelineRD::get_static_probe_face_count());
+	const uint32_t previous_layer_mask = final_frame_plan.draw_face_masks[state.previous_probe_index] << (state.previous_probe_index * TexelSplatPipelineRD::get_static_probe_face_count());
+	final_frame_plan.draw_layer_mask = final_frame_plan.draw_face_masks[0] | current_layer_mask | previous_layer_mask;
+	if (final_frame_plan.draw_face_masks[0] == 0) {
+		return;
+	}
+	const uint32_t allowed_layer_mask = eye_layer_mask | current_layer_mask | previous_layer_mask;
+	if (final_frame_plan.draw_face_masks[state.current_probe_index] == 0 || (final_frame_plan.draw_layer_mask & current_layer_mask) == 0 || (final_frame_plan.draw_layer_mask & ~allowed_layer_mask) != 0 || (final_frame_plan.transitioning && final_frame_plan.draw_face_masks[state.previous_probe_index] == 0)) {
+		WARN_PRINT_ONCE("Texel splatting Stage 5 Phase 2 requires Eye and Current plus an optional valid Previous probe. Skipping replacement for this frame.");
+		return;
+	}
+	if (!_prepare_texel_splat_composite(p_render_buffers, p_camera_data, final_frame_plan)) {
+		WARN_PRINT_ONCE("Texel splatting Stage 5 Phase 2 could not prepare the screen-grid composite. Skipping replacement for this frame.");
+		return;
+	}
+
+	rb_data->texel_splat_pre_transparent_draw_pending = true;
+}
+
+void RenderForwardClustered::draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const TexelSplatProbeFramePlan &p_frame_plan) {
+	if (_prepare_texel_splat_composite(p_render_buffers, p_camera_data, p_frame_plan)) {
+		_draw_prepared_texel_splats(p_render_buffers);
+	}
+}
+
+bool RenderForwardClustered::_prepare_texel_splat_composite(const Ref<RenderSceneBuffers> &p_render_buffers, const RendererSceneRender::CameraData *p_camera_data, const TexelSplatProbeFramePlan &p_frame_plan) {
+	ERR_FAIL_COND_V(!is_texel_splatting_enabled(), false);
+	ERR_FAIL_NULL_V(p_camera_data, false);
+
+	if (p_camera_data->view_count != 1) {
+		return false;
+	}
+
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), false);
+	ERR_FAIL_COND_V(!rb->has_internal_texture(), false);
+	if (rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
+		return false;
+	}
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	ERR_FAIL_COND_V(rb_data.is_null(), false);
+	TexelSplatPipelineRD *texel_splat_pipeline = rb_data->ensure_texel_splat_pipeline();
+	ERR_FAIL_NULL_V(texel_splat_pipeline, false);
+
+	if (!rb->has_depth_texture()) {
+		WARN_PRINT_ONCE("Texel splatting screen-grid composite requested, but the render buffer has no depth texture. Keeping normal Forward+ for this frame.");
+		return false;
+	}
+	RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture(), rb->get_depth_texture());
+	ERR_FAIL_COND_V(framebuffer.is_null(), false);
 
 	Projection depth_correction;
 	depth_correction.set_depth_correction(true);
 	Projection view_projection = (depth_correction * p_camera_data->main_projection) * Projection(p_camera_data->main_transform.affine_inverse());
 
-	const bool use_depth_test = p_pre_transparent || texel_splat_pipeline->is_draw_depth_test_enabled();
-	texel_splat_pipeline->draw_splats(framebuffer, view_projection, p_probe_face_transforms, draw_size, p_camera_data->main_transform.origin, p_active_layer_mask, texel_splat_directional_light.direction, texel_splat_directional_light.color, texel_splat_directional_light.enabled, use_depth_test);
+	return texel_splat_pipeline->prepare_resolve_and_composite(framebuffer, view_projection, p_camera_data->main_projection.get_z_far(), p_frame_plan.probe_face_transforms, rb->get_internal_size(), p_camera_data->main_transform.origin, p_frame_plan.grid_step, p_frame_plan.draw_face_masks[0], p_frame_plan.draw_face_masks[p_frame_plan.current_probe_index], p_frame_plan.draw_face_masks[p_frame_plan.previous_probe_index], p_frame_plan.current_probe_index, p_frame_plan.previous_probe_index, p_frame_plan.transition_fade, p_frame_plan.transitioning, texel_splat_directional_light.direction, texel_splat_directional_light.color, texel_splat_directional_light.enabled);
+}
 
-	if (depth_test_copy_framebuffer.is_valid()) {
-		copy_effects->copy_to_fb_rect(rb->get_internal_texture(), depth_test_copy_framebuffer, Rect2(Vector2(), depth_test_copy_size), false, false);
-	}
+void RenderForwardClustered::_draw_prepared_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers) {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	DEV_ASSERT(rb.is_valid());
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	DEV_ASSERT(rb_data.is_valid());
+	DEV_ASSERT(rb_data->texel_splat_pipeline != nullptr);
+
+	RENDER_TIMESTAMP("TS Screen Grid Resolve Begin");
+	rb_data->texel_splat_pipeline->execute_prepared_resolve_and_composite();
+	RENDER_TIMESTAMP("TS Screen Grid Resolve End");
 }
 
 void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) {
@@ -5327,16 +5594,6 @@ RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
 	texel_splatting_enabled = GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/enabled");
 
-	if (texel_splatting_enabled) {
-		texel_splat_pipeline = memnew(TexelSplatPipelineRD);
-		if (!texel_splat_pipeline->initialize()) {
-			memdelete(texel_splat_pipeline);
-			texel_splat_pipeline = nullptr;
-			texel_splatting_enabled = false;
-			WARN_PRINT("Texel splatting was requested, but required RD probe texture formats are not supported by this device.");
-		}
-	}
-
 	/* SCENE SHADER */
 
 	{
@@ -5480,10 +5737,6 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
-	if (texel_splat_pipeline != nullptr) {
-		memdelete(texel_splat_pipeline);
-		texel_splat_pipeline = nullptr;
-	}
 
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);

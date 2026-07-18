@@ -1209,6 +1209,19 @@ vec3 encode24(vec3 v) {
 	result *= fFittingScale;
 	return result;
 }
+
+#ifdef MODE_RENDER_TEXEL_GBUFFER
+vec2 texel_octahedral_encode(vec3 p_normal) {
+	vec3 normal = normalize(p_normal);
+	normal /= max(abs(normal.x) + abs(normal.y) + abs(normal.z), 0.00001);
+	vec2 encoded = normal.xy;
+	if (normal.z < 0.0) {
+		vec2 sign_not_zero = vec2(encoded.x >= 0.0 ? 1.0 : -1.0, encoded.y >= 0.0 ? 1.0 : -1.0);
+		encoded = (vec2(1.0) - abs(encoded.yx)) * sign_not_zero;
+	}
+	return encoded * 0.5 + 0.5;
+}
+#endif
 #endif // MODE_RENDER_NORMAL_ROUGHNESS
 
 void fragment_shader(in SceneData scene_data) {
@@ -1268,6 +1281,11 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #ifdef NORMAL_USED
+#ifdef MODE_RENDER_TEXEL_GBUFFER
+	// Keep the base surface normal before two-sided handling and material
+	// fragment code alter the normal used for shading.
+	vec3 texel_base_surface_normal_highp = normal_interp;
+#endif
 	vec3 normal_highp = normal_interp;
 #if defined(DO_SIDE_CHECK)
 	if (!gl_FrontFacing) {
@@ -3032,9 +3050,11 @@ void fragment_shader(in SceneData scene_data) {
 	texel_albedo_output_buffer.rgb = clamp(albedo + emission, vec3(0.0), vec3(1.0));
 	texel_albedo_output_buffer.a = alpha;
 
-	vec3 texel_world_normal = normalize(mat3(inv_view_matrix) * normal);
-	texel_normal_output_buffer.rgb = encode24(texel_world_normal) * 0.5 + 0.5;
-	texel_normal_output_buffer.a = 0.0;
+	vec3 texel_world_shading_normal = normalize(mat3(inv_view_matrix) * normal);
+	vec3 texel_world_base_surface_normal = normalize(mat3(inv_view_matrix) * texel_base_surface_normal_highp);
+	texel_normal_output_buffer = vec4(
+			texel_octahedral_encode(texel_world_shading_normal),
+			texel_octahedral_encode(texel_world_base_surface_normal));
 
 	texel_radial_depth_output_buffer = max(abs(vertex.x), max(abs(vertex.y), abs(vertex.z)));
 	texel_object_id_output_buffer = floatBitsToUint(instances.data[instance_index].compressed_aabb_position_pad.w);

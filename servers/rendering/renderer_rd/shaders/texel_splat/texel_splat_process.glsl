@@ -30,6 +30,27 @@ layout(set = 0, binding = 6, std430) restrict buffer Counters {
 	uint cross_face_empty_suppressed_count;
 	uint cross_face_edge_count;
 	uint cross_object_continuity_count;
+	uint invalid_base_surface_normal_count;
+	uint pre_raster_splat_count;
+	uint invalid_or_nonfinite_splat_count;
+	uint degenerate_splat_count;
+	uint winding_failure_count;
+	uint extent_failure_count;
+	uint clip_nonfinite_count;
+	uint clip_polygon_overflow_count;
+	uint clip_divide_invalid_count;
+	uint ndc_bbox_invalid_count;
+	uint fully_clipped_splat_count;
+	uint expected_span_saturated_count;
+	uint expected_grazing_strip_count;
+	uint rasterized_geometry_pixel_count;
+	uint jacobian_measurable_pixel_count;
+	uint jacobian_unmeasurable_pixel_count;
+	uint unexpected_jacobian_unmeasurable_pixel_count;
+	uint ray_structure_failure_count;
+	uint max_world_extent_ratio_bits;
+	uint max_diagonal_extent_ratio_bits;
+	uint max_alignment_error_bits;
 }
 counters;
 
@@ -56,6 +77,16 @@ const uint FLAG_CONT_RIGHT = 32u;
 const uint FLAG_CONT_BOTTOM = 64u;
 const uint FLAG_CONT_TOP = 128u;
 const float EDGE_DEPTH_THRESHOLD = 0.002;
+
+vec3 octahedral_decode(vec2 p_encoded) {
+	vec2 encoded = p_encoded * 2.0 - 1.0;
+	vec3 normal = vec3(encoded, 1.0 - abs(encoded.x) - abs(encoded.y));
+	if (normal.z < 0.0) {
+		vec2 sign_not_zero = vec2(normal.x >= 0.0 ? 1.0 : -1.0, normal.y >= 0.0 ? 1.0 : -1.0);
+		normal.xy = (vec2(1.0) - abs(normal.yx)) * sign_not_zero;
+	}
+	return normalize(normal);
+}
 
 uint get_texel_index(uvec3 p_coord) {
 	return (p_coord.z * params.probe_size + p_coord.y) * params.probe_size + p_coord.x;
@@ -172,7 +203,7 @@ bool classify_neighbor_debug_edge(ivec3 p_coord, ivec2 p_offset, uint p_object_i
 		atomicAdd(counters.cross_face_resolved_count, 1u);
 	}
 
-	vec3 neighbor_normal = normalize(texelFetch(probe_normal, neighbor_coord, 0).xyz * 2.0 - 1.0);
+	vec3 neighbor_normal = octahedral_decode(texelFetch(probe_normal, neighbor_coord, 0).ba);
 	bool edge = neighbor_object_id != p_object_id || dot(p_normal, neighbor_normal) < 0.85;
 	if (cross_face && edge) {
 		atomicAdd(counters.cross_face_edge_count, 1u);
@@ -232,11 +263,19 @@ void main() {
 	vec4 albedo = texelFetch(probe_albedo, icoord, 0);
 	float radial_depth = texelFetch(probe_radial, icoord, 0).r;
 
-	bool visible = object_id != 0u && radial_depth > 0.0 && albedo.a > 0.0;
+	vec4 packed_normals = texelFetch(probe_normal, icoord, 0);
+	vec3 base_surface_normal = octahedral_decode(packed_normals.ba);
+	bool base_surface_normal_valid = !any(isnan(packed_normals)) && !any(isinf(packed_normals)) &&
+			!any(isnan(base_surface_normal)) && !any(isinf(base_surface_normal)) && dot(base_surface_normal, base_surface_normal) > 0.99;
+	bool visible_candidate = object_id != 0u && radial_depth > 0.0 && albedo.a > 0.0;
+	if (visible_candidate && !base_surface_normal_valid) {
+		atomicAdd(counters.invalid_base_surface_normal_count, 1u);
+	}
+	bool visible = visible_candidate && base_surface_normal_valid;
 	uint flags = visible ? FLAG_VISIBLE : 0u;
 
 	if (visible) {
-		vec3 normal = normalize(texelFetch(probe_normal, icoord, 0).xyz * 2.0 - 1.0);
+		vec3 normal = base_surface_normal;
 		uint continuity_mask = get_continuity_mask(icoord, object_id, radial_depth);
 		flags |= continuity_mask;
 		bool edge = is_debug_edge_texel(icoord, object_id, normal);
@@ -252,6 +291,7 @@ void main() {
 		if (edge) {
 			atomicAdd(counters.edge_count, 1u);
 		}
+
 	}
 
 	splat_flags.data[texel_index] = flags;

@@ -326,10 +326,25 @@ public:
 
 	virtual bool is_texel_splatting_enabled() const { return false; }
 	virtual uint32_t get_texel_splatting_probe_count() const { return 0; }
-	virtual void render_texel_splat_probe_gbuffer(const CameraData *, const PagedArray<RenderGeometryInstance *> &, RID, RID, uint32_t, float) {}
-	virtual void process_texel_splat_probe_data(uint32_t p_active_layer_mask) {}
-	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &, const CameraData *, const Vector<Transform3D> &, uint32_t p_active_layer_mask) {}
-	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &, const CameraData *, const Vector<Transform3D> &, uint32_t p_active_layer_mask) {}
+	struct TexelSplatProbeFramePlan {
+		Vector3 probe_origins[3];
+		uint32_t capture_face_masks[3] = {};
+		uint32_t draw_face_masks[3] = {};
+		Vector<Transform3D> probe_face_transforms;
+		uint32_t capture_layer_mask = 0;
+		uint32_t draw_layer_mask = 0;
+		uint32_t current_probe_index = 1;
+		uint32_t previous_probe_index = 2;
+		float grid_step = 1.0f;
+		float transition_fade = 1.0f;
+		bool transitioning = false;
+		uint64_t generation = 0;
+	};
+	virtual bool prepare_texel_splat_probe_frame(const Ref<RenderSceneBuffers> &, const CameraData *, RID, uint32_t, TexelSplatProbeFramePlan &) { return false; }
+	virtual void render_texel_splat_probe_gbuffer(const Ref<RenderSceneBuffers> &, const CameraData *, const PagedArray<RenderGeometryInstance *> &, RID, RID, uint32_t, float) {}
+	virtual bool process_texel_splat_probe_data(const Ref<RenderSceneBuffers> &, uint32_t p_capture_layer_mask, uint32_t p_active_layer_mask) { return false; }
+	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &, const CameraData *, const TexelSplatProbeFramePlan &) {}
+	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &, const CameraData *, const TexelSplatProbeFramePlan &) {}
 
 	virtual void render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) = 0;
 	virtual void render_particle_collider_heightfield(RID p_collider, const Transform3D &p_transform, const PagedArray<RenderGeometryInstance *> &p_instances) = 0;

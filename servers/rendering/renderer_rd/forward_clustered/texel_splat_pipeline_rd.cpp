@@ -34,6 +34,8 @@
 #include "core/string/print_string.h"
 #include "core/error/error_macros.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/storage/utilities.h"
 
 namespace RendererSceneRenderImplementation {
 
@@ -75,6 +77,8 @@ bool TexelSplatPipelineRD::initialize() {
 }
 
 void TexelSplatPipelineRD::free() {
+	discard_prepared_resolve_and_composite();
+	_free_screen_grid_resources(screen_grid);
 	_free_draw_resources();
 	_free_process_resources();
 	_free_probe_framebuffers();
@@ -86,25 +90,32 @@ void TexelSplatPipelineRD::sync_project_settings() {
 	_load_project_settings();
 }
 
-void TexelSplatPipelineRD::process_probe_data(uint32_t p_active_layer_mask) {
-	ERR_FAIL_COND(!initialized);
-	ERR_FAIL_COND(process_pipeline.is_null());
-	ERR_FAIL_COND(process_uniform_set.is_null());
+bool TexelSplatPipelineRD::process_probe_data(uint32_t p_active_layer_mask) {
+	ERR_FAIL_COND_V(!initialized, false);
+	ERR_FAIL_COND_V(process_pipeline.is_null(), false);
+	ERR_FAIL_COND_V(process_uniform_set.is_null(), false);
 
 	_load_project_settings();
+	if (bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/force_process_failure"))) {
+		return false;
+	}
 
 	RenderingDevice *rd = RD::get_singleton();
-	ERR_FAIL_NULL(rd);
+	ERR_FAIL_NULL_V(rd, false);
+	// Draw-health atomics are written after process dispatch. Read the complete
+	// previous frame before resetting the shared counter buffer.
+	_debug_log_counters(rd);
 
 	CounterData counters;
 	DrawIndirectArgs draw_args;
-	ERR_FAIL_COND(rd->buffer_update(counter_buffer, 0, sizeof(CounterData), &counters) != OK);
-	ERR_FAIL_COND(rd->buffer_update(draw_args_buffer, 0, sizeof(DrawIndirectArgs), &draw_args) != OK);
+	ERR_FAIL_COND_V(rd->buffer_update(counter_buffer, 0, sizeof(CounterData), &counters) != OK, false);
+	ERR_FAIL_COND_V(rd->buffer_update(draw_args_buffer, 0, sizeof(DrawIndirectArgs), &draw_args) != OK, false);
 
+	RENDER_TIMESTAMP("TS Process Begin");
 	rd->draw_command_begin_label("Texel Splat Process");
 
 	ProcessPushConstant push_constant;
-	push_constant.probe_size = PROBE_SIZE;
+	push_constant.probe_size = probe_size;
 	push_constant.layer_count = PROBE_LAYER_COUNT;
 	push_constant.max_visible_refs = texel_capacity;
 	push_constant.active_layer_mask = p_active_layer_mask;
@@ -113,40 +124,60 @@ void TexelSplatPipelineRD::process_probe_data(uint32_t p_active_layer_mask) {
 	rd->compute_list_bind_compute_pipeline(compute_list, process_pipeline);
 	rd->compute_list_bind_uniform_set(compute_list, process_uniform_set, 0);
 	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(ProcessPushConstant));
-	rd->compute_list_dispatch_threads(compute_list, PROBE_SIZE, PROBE_SIZE, PROBE_LAYER_COUNT);
+	rd->compute_list_dispatch_threads(compute_list, probe_size, probe_size, PROBE_LAYER_COUNT);
 	rd->compute_list_add_barrier(compute_list);
 	rd->compute_list_end();
-
-	_debug_log_counters(rd);
+	RENDER_TIMESTAMP("TS Process End");
 
 	rd->draw_command_end_label();
+	return true;
 }
 
-void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_view_projection, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_camera_position, uint32_t p_active_layer_mask, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled, bool p_depth_test_enabled) {
-	ERR_FAIL_COND(!initialized);
-	ERR_FAIL_COND(p_framebuffer.is_null());
-	ERR_FAIL_COND(draw_uniform_set.is_null());
-	ERR_FAIL_COND(draw_args_buffer.is_null());
-	ERR_FAIL_COND(p_probe_transforms.size() != PROBE_LAYER_COUNT);
+bool TexelSplatPipelineRD::prepare_resolve_and_composite(RID p_framebuffer, const Projection &p_view_projection, float p_camera_far, const Vector<Transform3D> &p_probe_transforms, const Size2i &p_viewport_size, const Vector3 &p_camera_position, float p_grid_step, uint32_t p_eye_face_mask, uint32_t p_current_face_mask, uint32_t p_previous_face_mask, uint32_t p_current_probe_index, uint32_t p_previous_probe_index, float p_transition_fade, bool p_transitioning, const Vector3 &p_directional_light_direction, const Color &p_directional_light_color, bool p_directional_light_enabled) {
+	discard_prepared_resolve_and_composite();
+	ERR_FAIL_COND_V(!initialized, false);
+	ERR_FAIL_COND_V(p_framebuffer.is_null(), false);
+	ERR_FAIL_COND_V(resolve_pipeline.is_null(), false);
+	ERR_FAIL_COND_V(composite_shader_rd.is_null(), false);
+	ERR_FAIL_COND_V(draw_state_buffer.is_null(), false);
+	ERR_FAIL_COND_V(p_probe_transforms.size() != PROBE_LAYER_COUNT, false);
+	ERR_FAIL_COND_V(p_current_probe_index == 0 || p_current_probe_index >= PROBE_COUNT, false);
+	ERR_FAIL_COND_V(p_previous_probe_index == 0 || p_previous_probe_index >= PROBE_COUNT, false);
 
 	_load_project_settings();
+	if (!ensure_screen_grid(p_viewport_size)) {
+		return false;
+	}
+	ERR_FAIL_COND_V(screen_grid.resolve_uniform_set.is_null(), false);
+	ERR_FAIL_COND_V(screen_grid.composite_uniform_set.is_null(), false);
 
 	RenderingDevice *rd = RD::get_singleton();
-	ERR_FAIL_NULL(rd);
+	ERR_FAIL_NULL_V(rd, false);
+	ERR_FAIL_COND_V(!rd->framebuffer_is_valid(p_framebuffer), false);
+	ERR_FAIL_COND_V(!rd->uniform_set_is_valid(screen_grid.resolve_uniform_set), false);
+	ERR_FAIL_COND_V(!rd->uniform_set_is_valid(screen_grid.composite_uniform_set), false);
+	RID render_pipeline = composite_pipeline.get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(p_framebuffer));
+	ERR_FAIL_COND_V(render_pipeline.is_null(), false);
 
 	DrawState draw_state;
 	RendererRD::MaterialStorage::store_camera(p_view_projection, draw_state.view_projection);
+	RendererRD::MaterialStorage::store_camera(p_view_projection.inverse(), draw_state.inverse_view_projection);
 	for (uint32_t i = 0; i < PROBE_LAYER_COUNT; i++) {
 		RendererRD::MaterialStorage::store_transform(p_probe_transforms[i], draw_state.probe_transforms[i]);
+		RendererRD::MaterialStorage::store_transform(p_probe_transforms[i].affine_inverse(), draw_state.probe_inverse_transforms[i]);
 	}
-	draw_state.params[0] = float(PROBE_SIZE);
-	draw_state.params[1] = splat_expansion_texels;
-	draw_state.params[2] = float(p_viewport_size.x);
-	draw_state.params[3] = float(p_viewport_size.y);
+	draw_state.params[0] = float(probe_size);
+	draw_state.params[1] = float(p_viewport_size.x);
+	draw_state.params[2] = float(p_viewport_size.y);
+	draw_state.params[3] = MAX(p_camera_far, 0.001f);
+	draw_state.grid_params[0] = float(screen_grid.size.x);
+	draw_state.grid_params[1] = float(screen_grid.size.y);
+	draw_state.grid_params[2] = float(pixel_scale);
+	draw_state.grid_params[3] = MAX(p_grid_step, 0.001f);
 	draw_state.debug_params[0] = float(debug_view);
 	draw_state.debug_params[1] = float(debug_probe_layer);
-	draw_state.debug_params[2] = 0.0f;
-	draw_state.debug_params[3] = 0.0f;
+	draw_state.debug_params[2] = debug_log_counters ? 1.0f : 0.0f;
+	draw_state.debug_params[3] = disocclusion_guard_enabled ? 1.0f : 0.0f;
 	const Vector3 light_direction = p_directional_light_direction.normalized();
 	draw_state.directional_light_direction[0] = light_direction.x;
 	draw_state.directional_light_direction[1] = light_direction.y;
@@ -159,30 +190,106 @@ void TexelSplatPipelineRD::draw_splats(RID p_framebuffer, const Projection &p_vi
 	draw_state.camera_position[0] = p_camera_position.x;
 	draw_state.camera_position[1] = p_camera_position.y;
 	draw_state.camera_position[2] = p_camera_position.z;
-	draw_state.camera_position[3] = float(p_active_layer_mask);
+	draw_state.camera_position[3] = 0.0f;
+	draw_state.transition_params[0] = CLAMP(p_transition_fade, 0.0f, 1.0f);
+	draw_state.transition_params[1] = float(p_current_probe_index);
+	draw_state.transition_params[2] = float(p_previous_probe_index);
+	draw_state.transition_params[3] = p_transitioning ? 1.0f : 0.0f;
+	draw_state.probe_masks[0] = p_eye_face_mask & ((1u << PROBE_FACE_COUNT) - 1u);
+	draw_state.probe_masks[1] = p_current_face_mask & ((1u << PROBE_FACE_COUNT) - 1u);
+	draw_state.probe_masks[2] = p_previous_face_mask & ((1u << PROBE_FACE_COUNT) - 1u);
+	draw_state.probe_masks[3] = transition_dither_mode;
+	draw_state.reprojection_params[0] = reprojection_min_tolerance;
+	draw_state.reprojection_params[1] = reprojection_max_tolerance;
+	draw_state.reprojection_params[2] = reprojection_texel_tolerance_scale;
+	draw_state.reprojection_params[3] = reprojection_search_forward_tolerance_scale;
+	draw_state.reprojection_control[0] = float(reprojection_scan_steps);
+	draw_state.reprojection_control[1] = float(reprojection_bisection_steps);
+	draw_state.reprojection_control[2] = reprojection_search_back_tolerance_scale;
 
-	ERR_FAIL_COND(rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &draw_state) != OK);
+	draw_state.reprojection_control[3] = float(reprojection_source_mode);
 
-	rd->draw_command_begin_label("Draw Texel Splats");
+	ERR_FAIL_COND_V(rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &draw_state) != OK, false);
+	if (bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/force_composite_prepare_failure"))) {
+		print_line("TexelSplat composite_prepare_forced_failure stage=post_preflight replacement=false");
+		return false;
+	}
 
-	RD::DrawListID draw_list = rd->draw_list_begin(p_framebuffer);
-	PipelineCacheRD &draw_pipeline = p_depth_test_enabled ? draw_pipeline_depth_test : draw_pipeline_no_depth;
-	RID pipeline = draw_pipeline.get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(p_framebuffer));
-	rd->draw_list_bind_render_pipeline(draw_list, pipeline);
-	rd->draw_list_bind_uniform_set(draw_list, draw_uniform_set, 0);
-	rd->draw_list_draw_indirect(draw_list, false, draw_args_buffer);
+	prepared_composite_framebuffer = p_framebuffer;
+	prepared_composite_pipeline = render_pipeline;
+	composite_prepared = true;
+	return true;
+}
+
+void TexelSplatPipelineRD::execute_prepared_resolve_and_composite() {
+	DEV_ASSERT(composite_prepared);
+	DEV_ASSERT(prepared_composite_framebuffer.is_valid());
+	DEV_ASSERT(prepared_composite_pipeline.is_valid());
+	DEV_ASSERT(screen_grid.resolve_uniform_set.is_valid());
+	DEV_ASSERT(screen_grid.composite_uniform_set.is_valid());
+
+	RenderingDevice *rd = RD::get_singleton();
+	DEV_ASSERT(rd != nullptr);
+	RID framebuffer = prepared_composite_framebuffer;
+	RID render_pipeline = prepared_composite_pipeline;
+	discard_prepared_resolve_and_composite();
+
+	rd->draw_command_begin_label("Resolve Texel Splat Screen Grid");
+
+	RD::ComputeListID compute_list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(compute_list, resolve_pipeline);
+	rd->compute_list_bind_uniform_set(compute_list, screen_grid.resolve_uniform_set, 0);
+	rd->compute_list_dispatch_threads(compute_list, screen_grid.size.x, screen_grid.size.y, 1);
+	rd->compute_list_add_barrier(compute_list);
+	rd->compute_list_end();
+
+	rd->draw_command_end_label();
+
+	rd->draw_command_begin_label("Composite Texel Splat Screen Grid");
+
+	RD::DrawListID draw_list = rd->draw_list_begin(framebuffer);
+	rd->draw_list_bind_render_pipeline(draw_list, render_pipeline);
+	rd->draw_list_bind_uniform_set(draw_list, screen_grid.composite_uniform_set, 0);
+	rd->draw_list_draw(draw_list, false, 1u, 3u);
 	rd->draw_list_end();
 
 	rd->draw_command_end_label();
 }
 
+void TexelSplatPipelineRD::discard_prepared_resolve_and_composite() {
+	prepared_composite_framebuffer = RID();
+	prepared_composite_pipeline = RID();
+	composite_prepared = false;
+}
+
 void TexelSplatPipelineRD::_load_project_settings() {
-	splat_expansion_texels = MAX(0.0f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/splat_expansion_texels")));
+	const uint32_t normalized_probe_size = normalize_probe_size(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/probe_size")));
+	if (!initialized) {
+		probe_size = normalized_probe_size;
+	}
+	splat_expansion_texels = CLAMP(float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/splat_expansion_texels")), 0.0f, 2.0f);
+	pixel_scale = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/pixel_scale")), 1, 8));
+	transition_dither_mode = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/transition_dither_mode")), 0, 1));
 	debug_view = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/view")), 0, int32_t(DEBUG_VIEW_MAX - 1)));
-	debug_probe_layer = CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/probe_layer")), -1, int32_t(PROBE_LAYER_COUNT - 1));
+	debug_probe_layer = CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/probe_layer")), -4, int32_t(PROBE_LAYER_COUNT - 1));
+	reprojection_source_mode = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/resolve_source_mode")), 0, 3));
 	debug_log_counters = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters"));
 	debug_log_counter_interval = MAX(1u, uint32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counter_interval_frames")));
 	draw_depth_test_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_test_enabled"));
+	depth_tie_bias_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_tie_bias_enabled"));
+	disocclusion_guard_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/disocclusion_guard_enabled"));
+	reprojection_scan_steps = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/scan_steps")), 4, 64));
+	reprojection_bisection_steps = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/bisection_steps")), 1, 16));
+	reprojection_min_tolerance = MAX(0.0001f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/min_tolerance")));
+	reprojection_max_tolerance = MAX(reprojection_min_tolerance, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/max_tolerance")));
+	reprojection_texel_tolerance_scale = MAX(0.25f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/texel_tolerance_scale")));
+	reprojection_search_back_tolerance_scale = MAX(1.0f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/search_back_tolerance_scale")));
+	reprojection_search_forward_tolerance_scale = MAX(0.25f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/search_forward_tolerance_scale")));
+}
+
+uint32_t TexelSplatPipelineRD::normalize_probe_size(int32_t p_requested_size) {
+	const uint32_t requested_probe_size = uint32_t(CLAMP(p_requested_size, 128, 512));
+	return CLAMP(((requested_probe_size + 16u) / 32u) * 32u, 128u, 512u);
 }
 
 void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
@@ -203,6 +310,12 @@ void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
 	DrawIndirectArgs draw_args;
 	memcpy(&counters, counter_data.ptr(), sizeof(CounterData));
 	memcpy(&draw_args, draw_args_data.ptr(), sizeof(DrawIndirectArgs));
+	float max_world_extent_ratio = 0.0f;
+	float max_diagonal_extent_ratio = 0.0f;
+	float max_alignment_error = 0.0f;
+	memcpy(&max_world_extent_ratio, &counters.max_world_extent_ratio_bits, sizeof(float));
+	memcpy(&max_diagonal_extent_ratio, &counters.max_diagonal_extent_ratio_bits, sizeof(float));
+	memcpy(&max_alignment_error, &counters.max_alignment_error_bits, sizeof(float));
 
 	print_line("TexelSplat counters frame=" + String::num_uint64(debug_frame_index) +
 			" debug_probe_layer=" + itos(debug_probe_layer) +
@@ -214,6 +327,27 @@ void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
 			" cross_face_empty_suppressed=" + String::num_uint64(counters.cross_face_empty_suppressed_count) +
 			" cross_face_edges=" + String::num_uint64(counters.cross_face_edge_count) +
 			" cross_object_continuous=" + String::num_uint64(counters.cross_object_continuity_count) +
+			" invalid_base_normal=" + String::num_uint64(counters.invalid_base_surface_normal_count) +
+			" pre_raster_splats=" + String::num_uint64(counters.pre_raster_splat_count) +
+			" invalid_or_nonfinite_splats=" + String::num_uint64(counters.invalid_or_nonfinite_splat_count) +
+			" degenerate_splats=" + String::num_uint64(counters.degenerate_splat_count) +
+			" winding_failures=" + String::num_uint64(counters.winding_failure_count) +
+			" extent_failures=" + String::num_uint64(counters.extent_failure_count) +
+			" clip_nonfinite=" + String::num_uint64(counters.clip_nonfinite_count) +
+			" clip_polygon_overflow=" + String::num_uint64(counters.clip_polygon_overflow_count) +
+			" clip_divide_invalid=" + String::num_uint64(counters.clip_divide_invalid_count) +
+			" ndc_bbox_invalid=" + String::num_uint64(counters.ndc_bbox_invalid_count) +
+			" fully_clipped_splats=" + String::num_uint64(counters.fully_clipped_splat_count) +
+			" expected_span_saturated=" + String::num_uint64(counters.expected_span_saturated_count) +
+			" expected_grazing_strips=" + String::num_uint64(counters.expected_grazing_strip_count) +
+			" rasterized_geometry_pixels=" + String::num_uint64(counters.rasterized_geometry_pixel_count) +
+			" jacobian_measurable_pixels=" + String::num_uint64(counters.jacobian_measurable_pixel_count) +
+			" jacobian_unmeasurable_pixels=" + String::num_uint64(counters.jacobian_unmeasurable_pixel_count) +
+			" unexpected_jacobian_unmeasurable_pixels=" + String::num_uint64(counters.unexpected_jacobian_unmeasurable_pixel_count) +
+			" ray_structure_failure=" + String::num_uint64(counters.ray_structure_failure_count) +
+			" max_world_extent_ratio=" + String::num(max_world_extent_ratio, 6) +
+			" max_diagonal_extent_ratio=" + String::num(max_diagonal_extent_ratio, 6) +
+			" min_signed_alignment=" + String::num(1.0f - max_alignment_error, 6) +
 			" draw_instances=" + String::num_uint64(draw_args.instance_count) +
 			" capacity=" + String::num_uint64(texel_capacity));
 }
@@ -297,7 +431,7 @@ bool TexelSplatPipelineRD::_create_process_resources() {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
 
-	texel_capacity = PROBE_SIZE * PROBE_SIZE * PROBE_LAYER_COUNT;
+	texel_capacity = probe_size * probe_size * PROBE_LAYER_COUNT;
 	const uint32_t texel_buffer_size = sizeof(uint32_t) * texel_capacity;
 
 	visible_refs_buffer = rd->storage_buffer_create(texel_buffer_size);
@@ -363,40 +497,87 @@ bool TexelSplatPipelineRD::_create_draw_resources() {
 	draw_state_buffer = rd->storage_buffer_create(sizeof(DrawState), draw_state_data);
 	ERR_FAIL_COND_V_MSG(draw_state_buffer.is_null(), false, "Failed to create texel splatting draw state buffer.");
 
-	Vector<String> draw_modes;
-	draw_modes.push_back("");
-	draw_shader.initialize(draw_modes);
-	draw_shader_version = draw_shader.version_create();
-	draw_shader_rd = draw_shader.version_get_shader(draw_shader_version, 0);
-	ERR_FAIL_COND_V_MSG(draw_shader_rd.is_null(), false, "Failed to create texel splatting draw shader.");
+	Vector<String> resolve_modes;
+	resolve_modes.push_back("");
+	resolve_shader.initialize(resolve_modes);
+	resolve_shader_version = resolve_shader.version_create();
+	resolve_shader_rd = resolve_shader.version_get_shader(resolve_shader_version, 0);
+	ERR_FAIL_COND_V_MSG(resolve_shader_rd.is_null(), false, "Failed to create texel splatting screen-grid resolve shader.");
+
+	resolve_pipeline = rd->compute_pipeline_create(resolve_shader_rd);
+	ERR_FAIL_COND_V_MSG(resolve_pipeline.is_null(), false, "Failed to create texel splatting screen-grid resolve pipeline.");
+
+	Vector<String> composite_modes;
+	composite_modes.push_back("");
+	composite_shader.initialize(composite_modes);
+	composite_shader_version = composite_shader.version_create();
+	composite_shader_rd = composite_shader.version_get_shader(composite_shader_version, 0);
+	ERR_FAIL_COND_V_MSG(composite_shader_rd.is_null(), false, "Failed to create texel splatting screen-grid composite shader.");
 
 	RD::PipelineRasterizationState rasterization_state;
 	rasterization_state.cull_mode = RD::POLYGON_CULL_DISABLED;
-
-	RD::PipelineDepthStencilState no_depth_state;
-
-	draw_pipeline_no_depth.setup(
-			draw_shader_rd,
-			RD::RENDER_PRIMITIVE_TRIANGLES,
-			rasterization_state,
-			RD::PipelineMultisampleState(),
-			no_depth_state,
-			RD::PipelineColorBlendState::create_blend(),
-			0);
 
 	RD::PipelineDepthStencilState depth_stencil_state;
 	depth_stencil_state.enable_depth_test = true;
 	depth_stencil_state.enable_depth_write = true;
 	depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
 
-	draw_pipeline_depth_test.setup(
-			draw_shader_rd,
+	composite_pipeline.setup(
+			composite_shader_rd,
 			RD::RENDER_PRIMITIVE_TRIANGLES,
 			rasterization_state,
 			RD::PipelineMultisampleState(),
 			depth_stencil_state,
-			RD::PipelineColorBlendState::create_blend(),
+			RD::PipelineColorBlendState::create_disabled(),
 			0);
+
+	return true;
+}
+
+bool TexelSplatPipelineRD::ensure_screen_grid(const Size2i &p_viewport_size) {
+	ERR_FAIL_COND_V(!initialized, false);
+	ERR_FAIL_COND_V(p_viewport_size.x <= 0 || p_viewport_size.y <= 0, false);
+
+	_load_project_settings();
+
+	const Size2i requested_grid_size((p_viewport_size.x + int(pixel_scale) - 1) / int(pixel_scale), (p_viewport_size.y + int(pixel_scale) - 1) / int(pixel_scale));
+	if (screen_grid.color.is_valid() && screen_grid.depth.is_valid() && screen_grid.meta.is_valid() &&
+			screen_grid.resolve_uniform_set.is_valid() && screen_grid.composite_uniform_set.is_valid() &&
+			screen_grid.size == requested_grid_size) {
+		return true;
+	}
+
+	ScreenGridResources new_resources;
+	if (!_create_screen_grid_resources(requested_grid_size, new_resources)) {
+		_free_screen_grid_resources(new_resources);
+		return false;
+	}
+
+	_free_screen_grid_resources(screen_grid);
+	screen_grid = new_resources;
+	return true;
+}
+
+bool TexelSplatPipelineRD::_create_screen_grid_resources(const Size2i &p_grid_size, ScreenGridResources &r_resources) {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	ERR_FAIL_COND_V(resolve_shader_rd.is_null(), false);
+	ERR_FAIL_COND_V(composite_shader_rd.is_null(), false);
+	ERR_FAIL_COND_V(draw_state_buffer.is_null(), false);
+	ERR_FAIL_COND_V(splat_flags_buffer.is_null(), false);
+
+	const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+	ERR_FAIL_COND_V_MSG(!_is_format_supported(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, "screen-grid color"), false, "Texel splatting screen-grid color texture format support check failed.");
+	ERR_FAIL_COND_V_MSG(!_is_format_supported(RD::DATA_FORMAT_R32_SFLOAT, usage_bits, "screen-grid depth"), false, "Texel splatting screen-grid depth texture format support check failed.");
+	ERR_FAIL_COND_V_MSG(!_is_format_supported(RD::DATA_FORMAT_R32G32_UINT, usage_bits, "screen-grid meta"), false, "Texel splatting screen-grid meta texture format support check failed.");
+
+	r_resources.color = _create_screen_grid_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_grid_size, "color");
+	ERR_FAIL_COND_V(r_resources.color.is_null(), false);
+	r_resources.depth = _create_screen_grid_texture(RD::DATA_FORMAT_R32_SFLOAT, p_grid_size, "depth");
+	ERR_FAIL_COND_V(r_resources.depth.is_null(), false);
+	r_resources.meta = _create_screen_grid_texture(RD::DATA_FORMAT_R32G32_UINT, p_grid_size, "meta");
+	ERR_FAIL_COND_V(r_resources.meta.is_null(), false);
+	r_resources.size = p_grid_size;
 
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	ERR_FAIL_NULL_V(material_storage, false);
@@ -404,17 +585,28 @@ bool TexelSplatPipelineRD::_create_draw_resources() {
 	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	ERR_FAIL_COND_V(nearest_sampler.is_null(), false);
 
-	Vector<RD::Uniform> uniforms;
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_ALBEDO].texture })));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_NORMAL].texture })));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_RADIAL].texture })));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_OBJECT_ID].texture })));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, visible_refs_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, splat_flags_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, draw_state_buffer));
+	Vector<RD::Uniform> resolve_uniforms;
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_ALBEDO].texture })));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_NORMAL].texture })));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_RADIAL].texture })));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_OBJECT_ID].texture })));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, splat_flags_buffer));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, draw_state_buffer));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, r_resources.color));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, r_resources.depth));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, r_resources.meta));
 
-	draw_uniform_set = rd->uniform_set_create(uniforms, draw_shader_rd, 0);
-	ERR_FAIL_COND_V_MSG(draw_uniform_set.is_null(), false, "Failed to create texel splatting draw uniform set.");
+	r_resources.resolve_uniform_set = rd->uniform_set_create(resolve_uniforms, resolve_shader_rd, 0);
+	ERR_FAIL_COND_V_MSG(r_resources.resolve_uniform_set.is_null(), false, "Failed to create texel splatting screen-grid resolve uniform set.");
+
+	Vector<RD::Uniform> composite_uniforms;
+	composite_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, r_resources.color })));
+	composite_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, r_resources.depth })));
+	composite_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, r_resources.meta })));
+	composite_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, draw_state_buffer));
+
+	r_resources.composite_uniform_set = rd->uniform_set_create(composite_uniforms, composite_shader_rd, 0);
+	ERR_FAIL_COND_V_MSG(r_resources.composite_uniform_set.is_null(), false, "Failed to create texel splatting screen-grid composite uniform set.");
 
 	return true;
 }
@@ -436,11 +628,24 @@ RD::DataFormat TexelSplatPipelineRD::_select_depth_format(uint32_t p_usage_bits)
 	return RD::DATA_FORMAT_MAX;
 }
 
+RID TexelSplatPipelineRD::_create_screen_grid_texture(RD::DataFormat p_format, const Size2i &p_size, const char *p_label) const {
+	RD::TextureFormat texture_format;
+	texture_format.format = p_format;
+	texture_format.width = p_size.x;
+	texture_format.height = p_size.y;
+	texture_format.texture_type = RD::TEXTURE_TYPE_2D;
+	texture_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+
+	RID texture = RD::get_singleton()->texture_create(texture_format, RD::TextureView());
+	ERR_FAIL_COND_V_MSG(texture.is_null(), RID(), "Failed to create texel splatting screen-grid texture '" + String(p_label) + "'.");
+	return texture;
+}
+
 RID TexelSplatPipelineRD::_create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const {
 	RD::TextureFormat texture_format;
 	texture_format.format = p_format;
-	texture_format.width = PROBE_SIZE;
-	texture_format.height = PROBE_SIZE;
+	texture_format.width = probe_size;
+	texture_format.height = probe_size;
 	texture_format.array_layers = PROBE_LAYER_COUNT;
 	texture_format.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
 	texture_format.usage_bits = p_usage_bits;
@@ -542,24 +747,60 @@ void TexelSplatPipelineRD::_free_draw_resources() {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL(rd);
 
-	if (draw_uniform_set.is_valid() && rd->uniform_set_is_valid(draw_uniform_set)) {
-		rd->free_rid(draw_uniform_set);
-	}
-	draw_uniform_set = RID();
+	_free_screen_grid_resources(screen_grid);
 
-	draw_pipeline_no_depth.clear();
-	draw_pipeline_depth_test.clear();
+	composite_pipeline.clear();
+
+	if (resolve_pipeline.is_valid()) {
+		rd->free_rid(resolve_pipeline);
+		resolve_pipeline = RID();
+	}
 
 	if (draw_state_buffer.is_valid()) {
 		rd->free_rid(draw_state_buffer);
 		draw_state_buffer = RID();
 	}
 
-	if (draw_shader_version.is_valid()) {
-		draw_shader.version_free(draw_shader_version);
-		draw_shader_version = RID();
+	if (resolve_shader_version.is_valid()) {
+		resolve_shader.version_free(resolve_shader_version);
+		resolve_shader_version = RID();
 	}
-	draw_shader_rd = RID();
+	resolve_shader_rd = RID();
+
+	if (composite_shader_version.is_valid()) {
+		composite_shader.version_free(composite_shader_version);
+		composite_shader_version = RID();
+	}
+	composite_shader_rd = RID();
+}
+
+void TexelSplatPipelineRD::_free_screen_grid_resources(ScreenGridResources &r_resources) {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+
+	if (r_resources.resolve_uniform_set.is_valid() && rd->uniform_set_is_valid(r_resources.resolve_uniform_set)) {
+		rd->free_rid(r_resources.resolve_uniform_set);
+	}
+	r_resources.resolve_uniform_set = RID();
+
+	if (r_resources.composite_uniform_set.is_valid() && rd->uniform_set_is_valid(r_resources.composite_uniform_set)) {
+		rd->free_rid(r_resources.composite_uniform_set);
+	}
+	r_resources.composite_uniform_set = RID();
+
+	if (r_resources.color.is_valid()) {
+		rd->free_rid(r_resources.color);
+		r_resources.color = RID();
+	}
+	if (r_resources.depth.is_valid()) {
+		rd->free_rid(r_resources.depth);
+		r_resources.depth = RID();
+	}
+	if (r_resources.meta.is_valid()) {
+		rd->free_rid(r_resources.meta);
+		r_resources.meta = RID();
+	}
+	r_resources.size = Size2i();
 }
 
 } // namespace RendererSceneRenderImplementation

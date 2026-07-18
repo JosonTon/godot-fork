@@ -89,19 +89,14 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 
 	SceneShaderForwardClustered scene_shader;
 	bool texel_splatting_enabled = false;
-	TexelSplatPipelineRD *texel_splat_pipeline = nullptr;
 	uint32_t next_texel_object_id = 1;
 	struct TexelSplatDirectionalLightCache {
 		bool enabled = false;
 		Vector3 direction = Vector3(0.0, 0.0, 1.0);
 		Color color = Color(1.0, 1.0, 1.0, 1.0);
 	} texel_splat_directional_light;
-	bool texel_splat_pre_transparent_draw_pending = false;
-	CameraData texel_splat_pre_transparent_camera_data;
-	Vector<Transform3D> texel_splat_pre_transparent_probe_face_transforms;
-	uint32_t texel_splat_pre_transparent_active_layer_mask = 0;
-
-	void _draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask, bool p_pre_transparent);
+	bool _prepare_texel_splat_composite(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const TexelSplatProbeFramePlan &p_frame_plan);
+	void _draw_prepared_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers);
 
 public:
 	/* Framebuffer */
@@ -118,6 +113,33 @@ public:
 
 	public:
 		ClusterBuilderRD *cluster_builder = nullptr;
+		TexelSplatPipelineRD *texel_splat_pipeline = nullptr;
+		bool texel_splat_pipeline_initialization_attempted = false;
+		bool texel_splat_pre_transparent_draw_pending = false;
+		struct TexelSplatViewState {
+			bool initialized = false;
+			RID scenario;
+			uint32_t visible_layers = 0;
+			uint32_t capture_layer_mask = 0;
+			uint32_t face_coverage_mode = 0;
+			float grid_step = 1.0f;
+			float probe_far = 0.0f;
+			Vector3 last_camera_position;
+			Vector3 last_camera_forward = Vector3(0.0, 0.0, -1.0);
+			Vector3 probe_origins[3];
+			uint32_t valid_face_masks[3] = {};
+			uint32_t current_probe_index = 1;
+			uint32_t previous_probe_index = 2;
+			float transition_fade = 1.0f;
+			float smoothed_speed = 0.0f;
+			bool transitioning = false;
+			bool transition_pending = false;
+			uint64_t schedule_frame = 0;
+			uint64_t generation = 0;
+		} texel_splat_view_state;
+
+		TexelSplatPipelineRD *ensure_texel_splat_pipeline();
+		void reset_texel_splat_pipeline();
 
 		struct SSEffectsData {
 			Projection ssil_last_frame_projections[RendererSceneRender::MAX_RENDER_VIEWS];
@@ -839,10 +861,11 @@ public:
 
 	virtual bool is_texel_splatting_enabled() const override;
 	virtual uint32_t get_texel_splatting_probe_count() const override;
-	virtual void render_texel_splat_probe_gbuffer(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) override;
-	virtual void process_texel_splat_probe_data(uint32_t p_active_layer_mask) override;
-	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) override;
-	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const Vector<Transform3D> &p_probe_face_transforms, uint32_t p_active_layer_mask) override;
+	virtual bool prepare_texel_splat_probe_frame(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, RID p_scenario, uint32_t p_visible_layers, TexelSplatProbeFramePlan &r_frame_plan) override;
+	virtual void render_texel_splat_probe_gbuffer(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_environment, RID p_camera_attributes, uint32_t p_probe_layer, float p_screen_mesh_lod_threshold) override;
+	virtual bool process_texel_splat_probe_data(const Ref<RenderSceneBuffers> &p_render_buffers, uint32_t p_capture_layer_mask, uint32_t p_active_layer_mask) override;
+	virtual void queue_texel_splat_pre_transparent_draw(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const TexelSplatProbeFramePlan &p_frame_plan) override;
+	virtual void draw_texel_splats(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const TexelSplatProbeFramePlan &p_frame_plan) override;
 
 	/* callback from updating our lighting UBOs, used to populate cluster builder */
 	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) override;

@@ -3732,7 +3732,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	if (is_texel_probe_capture) {
 		RENDER_TIMESTAMP("Render Texel Probe G-buffer");
-		scene_render->render_texel_splat_probe_gbuffer(p_camera_data, scene_cull_result.geometry_instances, p_environment, camera_attributes, uint32_t(p_texel_probe_layer), p_screen_mesh_lod_threshold);
+		scene_render->render_texel_splat_probe_gbuffer(p_render_buffers, p_camera_data, scene_cull_result.geometry_instances, p_environment, camera_attributes, uint32_t(p_texel_probe_layer), p_screen_mesh_lod_threshold);
 	} else {
 		RENDER_TIMESTAMP("Render 3D Scene");
 		scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
@@ -3754,8 +3754,16 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 }
 
 void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, uint32_t p_visible_layers, RID p_scenario, RID p_shadow_atlas, float p_screen_mesh_lod_threshold, float p_window_output_max_value) {
+	if (p_camera_data->view_count != 1) {
+		return;
+	}
+
 	const uint32_t probe_count = scene_render->get_texel_splatting_probe_count();
 	if (probe_count == 0) {
+		return;
+	}
+	RendererSceneRender::TexelSplatProbeFramePlan frame_plan;
+	if (!scene_render->prepare_texel_splat_probe_frame(p_render_buffers, p_camera_data, p_scenario, p_visible_layers, frame_plan)) {
 		return;
 	}
 	const uint32_t texel_capture_layer_mask = uint32_t(int64_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/capture_layer_mask")));
@@ -3783,32 +3791,14 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 		max_distance = 256.0f;
 	}
 
-	const Vector3 forward = -p_camera_data->main_transform.basis.get_column(Vector3::AXIS_Z).normalized();
-	const float probe_spacing = MIN(max_distance * 0.25f, 16.0f);
 	const uint32_t face_count = 6;
 	Vector<Transform3D> probe_face_transforms;
 	probe_face_transforms.resize(probe_count * face_count);
-	uint32_t active_layer_mask = 0;
-	float best_face_dot = -2.0f;
-	uint32_t best_face = 5;
-	const float eye_face_cull_dot = Math::cos(Math::deg_to_rad(103.0f));
-	for (uint32_t face = 0; face < face_count; face++) {
-		const float face_dot = view_normals[face].dot(forward);
-		if (face_dot > best_face_dot) {
-			best_face_dot = face_dot;
-			best_face = face;
-		}
-		if (face_dot >= eye_face_cull_dot) {
-			active_layer_mask |= 1u << face;
-		}
-	}
-	if (active_layer_mask == 0) {
-		active_layer_mask = 1u << best_face;
-	}
+	RENDER_TIMESTAMP("TS Capture Begin");
 
 	for (uint32_t probe = 0; probe < probe_count; probe++) {
 		Transform3D probe_transform;
-		probe_transform.origin = p_camera_data->main_transform.origin + forward * probe_spacing * float(probe);
+		probe_transform.origin = frame_plan.probe_origins[probe];
 
 		for (uint32_t face = 0; face < face_count; face++) {
 			Projection cm;
@@ -3820,7 +3810,7 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 			const uint32_t layer = probe * face_count + face;
 			Transform3D probe_face_transform = probe_transform * local_view;
 			probe_face_transforms.write[layer] = probe_face_transform;
-			if ((active_layer_mask & (1u << layer)) == 0) {
+			if ((frame_plan.capture_layer_mask & (1u << layer)) == 0) {
 				continue;
 			}
 
@@ -3831,10 +3821,14 @@ void RendererSceneCull::_render_texel_splat_probe_captures(const RendererSceneRe
 			_render_scene(&camera_data, p_render_buffers, p_environment, p_force_camera_attributes, RID(), texel_visible_layers, p_scenario, RID(), p_shadow_atlas, RID(), 0, p_screen_mesh_lod_threshold, p_window_output_max_value, false, nullptr, int(layer));
 		}
 	}
+	frame_plan.probe_face_transforms = probe_face_transforms;
+	RENDER_TIMESTAMP("TS Capture End");
 
-	RENDER_TIMESTAMP("Process Texel Probe Data");
-	scene_render->process_texel_splat_probe_data(active_layer_mask);
-	scene_render->queue_texel_splat_pre_transparent_draw(p_render_buffers, p_camera_data, probe_face_transforms, active_layer_mask);
+	const bool process_succeeded = scene_render->process_texel_splat_probe_data(p_render_buffers, frame_plan.capture_layer_mask, frame_plan.draw_layer_mask);
+	if (!process_succeeded) {
+		return;
+	}
+	scene_render->queue_texel_splat_pre_transparent_draw(p_render_buffers, p_camera_data, frame_plan);
 }
 
 RID RendererSceneCull::_render_get_environment(RID p_camera, RID p_scenario) {
