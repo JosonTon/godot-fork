@@ -3748,6 +3748,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/debug/force_composite_prepare_failure", false);
 	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counter_interval_frames", PROPERTY_HINT_RANGE, "1,600,1"), 60);
+	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_enabled", false);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::STRING, "rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_path", PROPERTY_HINT_DIR), "");
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_start_frame", PROPERTY_HINT_RANGE, "0,1000000,1,or_greater"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_frame_count", PROPERTY_HINT_RANGE, "0,100000,1,or_greater"), 0);
 	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_test_enabled", false);
 	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_tie_bias_enabled", true);
 

@@ -165,6 +165,7 @@ class TexelSplatPipelineRD {
 		RID resolve_uniform_set;
 		RID composite_uniform_set;
 		Size2i size;
+		bool copy_from_enabled = false;
 	};
 
 	ProbeTextureData probe_textures[PROBE_TEXTURE_MAX];
@@ -190,6 +191,7 @@ class TexelSplatPipelineRD {
 	ScreenGridResources screen_grid;
 	RID prepared_composite_framebuffer;
 	RID prepared_composite_pipeline;
+	DrawState prepared_draw_state;
 	uint32_t probe_size = DEFAULT_PROBE_SIZE;
 	uint32_t texel_capacity = 0;
 	uint32_t pixel_scale = 4;
@@ -201,6 +203,10 @@ class TexelSplatPipelineRD {
 	bool debug_log_counters = false;
 	uint32_t debug_log_counter_interval = 60;
 	uint64_t debug_frame_index = 0;
+	bool debug_raw_dump_enabled = false;
+	String debug_raw_dump_path;
+	uint64_t debug_raw_dump_start_frame = 0;
+	uint64_t debug_raw_dump_frame_count = 0;
 	bool draw_depth_test_enabled = false;
 	bool disocclusion_guard_enabled = true;
 	bool depth_tie_bias_enabled = true;
@@ -220,10 +226,13 @@ class TexelSplatPipelineRD {
 	bool _create_process_resources();
 	bool _create_draw_resources();
 	bool _create_screen_grid_resources(const Size2i &p_grid_size, ScreenGridResources &r_resources);
+	void _dispatch_resolve(RenderingDevice *p_rd);
 	void _debug_log_counters(RenderingDevice *p_rd);
+	void _debug_dump_screen_grid(RenderingDevice *p_rd);
+	bool _debug_write_screen_grid_dump(RenderingDevice *p_rd, uint32_t p_debug_view);
 	bool _is_format_supported(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RD::DataFormat _select_depth_format(uint32_t p_usage_bits) const;
-	RID _create_screen_grid_texture(RD::DataFormat p_format, const Size2i &p_size, const char *p_label) const;
+	RID _create_screen_grid_texture(RD::DataFormat p_format, const Size2i &p_size, uint32_t p_usage_bits, const char *p_label) const;
 	RID _create_probe_texture(RD::DataFormat p_format, uint32_t p_usage_bits, const char *p_label) const;
 	RID _create_probe_texture_slice(RID p_texture, uint32_t p_layer, const char *p_label) const;
 	void _free_probe_textures();

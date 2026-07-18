@@ -31,8 +31,9 @@
 #include "texel_splat_pipeline_rd.h"
 
 #include "core/config/project_settings.h"
-#include "core/string/print_string.h"
 #include "core/error/error_macros.h"
+#include "core/io/file_access.h"
+#include "core/string/print_string.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/utilities.h"
@@ -217,6 +218,7 @@ bool TexelSplatPipelineRD::prepare_resolve_and_composite(RID p_framebuffer, cons
 
 	prepared_composite_framebuffer = p_framebuffer;
 	prepared_composite_pipeline = render_pipeline;
+	prepared_draw_state = draw_state;
 	composite_prepared = true;
 	return true;
 }
@@ -236,14 +238,10 @@ void TexelSplatPipelineRD::execute_prepared_resolve_and_composite() {
 
 	rd->draw_command_begin_label("Resolve Texel Splat Screen Grid");
 
-	RD::ComputeListID compute_list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(compute_list, resolve_pipeline);
-	rd->compute_list_bind_uniform_set(compute_list, screen_grid.resolve_uniform_set, 0);
-	rd->compute_list_dispatch_threads(compute_list, screen_grid.size.x, screen_grid.size.y, 1);
-	rd->compute_list_add_barrier(compute_list);
-	rd->compute_list_end();
+	_dispatch_resolve(rd);
 
 	rd->draw_command_end_label();
+	_debug_dump_screen_grid(rd);
 
 	rd->draw_command_begin_label("Composite Texel Splat Screen Grid");
 
@@ -275,6 +273,10 @@ void TexelSplatPipelineRD::_load_project_settings() {
 	reprojection_source_mode = uint32_t(CLAMP(int32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/resolve_source_mode")), 0, 3));
 	debug_log_counters = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counters"));
 	debug_log_counter_interval = MAX(1u, uint32_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/log_counter_interval_frames")));
+	debug_raw_dump_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_enabled"));
+	debug_raw_dump_path = String(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_path"));
+	debug_raw_dump_start_frame = uint64_t(MAX(int64_t(0), int64_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_start_frame"))));
+	debug_raw_dump_frame_count = uint64_t(MAX(int64_t(0), int64_t(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/raw_dump_frame_count"))));
 	draw_depth_test_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_test_enabled"));
 	depth_tie_bias_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/debug/depth_tie_bias_enabled"));
 	disocclusion_guard_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/disocclusion_guard_enabled"));
@@ -350,6 +352,116 @@ void TexelSplatPipelineRD::_debug_log_counters(RenderingDevice *p_rd) {
 			" min_signed_alignment=" + String::num(1.0f - max_alignment_error, 6) +
 			" draw_instances=" + String::num_uint64(draw_args.instance_count) +
 			" capacity=" + String::num_uint64(texel_capacity));
+}
+
+void TexelSplatPipelineRD::_dispatch_resolve(RenderingDevice *p_rd) {
+	ERR_FAIL_NULL(p_rd);
+	RD::ComputeListID compute_list = p_rd->compute_list_begin();
+	p_rd->compute_list_bind_compute_pipeline(compute_list, resolve_pipeline);
+	p_rd->compute_list_bind_uniform_set(compute_list, screen_grid.resolve_uniform_set, 0);
+	p_rd->compute_list_dispatch_threads(compute_list, screen_grid.size.x, screen_grid.size.y, 1);
+	p_rd->compute_list_add_barrier(compute_list);
+	p_rd->compute_list_end();
+}
+
+void TexelSplatPipelineRD::_debug_dump_screen_grid(RenderingDevice *p_rd) {
+	ERR_FAIL_NULL(p_rd);
+	if (!debug_raw_dump_enabled || debug_raw_dump_frame_count == 0 || debug_raw_dump_path.is_empty()) {
+		return;
+	}
+	if (debug_frame_index < debug_raw_dump_start_frame || debug_frame_index - debug_raw_dump_start_frame >= debug_raw_dump_frame_count) {
+		return;
+	}
+	if (!screen_grid.copy_from_enabled) {
+		ERR_PRINT_ONCE("TexelSplat raw dump requested without copy-from screen-grid resources.");
+		return;
+	}
+
+	const uint32_t original_debug_view = uint32_t(CLAMP(int32_t(Math::round(prepared_draw_state.debug_params[0])), 0, int32_t(DEBUG_VIEW_MAX - 1)));
+	static const uint32_t raw_views[] = { DEBUG_VIEW_ALBEDO, DEBUG_VIEW_NORMAL, DEBUG_VIEW_SPLAT_ID };
+	bool original_grid_available = original_debug_view == raw_views[0];
+	bool dump_succeeded = true;
+	for (uint32_t raw_view : raw_views) {
+		if (!original_grid_available || raw_view != original_debug_view) {
+			prepared_draw_state.debug_params[0] = float(raw_view);
+			if (p_rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &prepared_draw_state) != OK) {
+				ERR_PRINT("TexelSplat raw dump could not update DrawState for auxiliary view.");
+				dump_succeeded = false;
+				break;
+			}
+			_dispatch_resolve(p_rd);
+		}
+		if (!_debug_write_screen_grid_dump(p_rd, raw_view)) {
+			dump_succeeded = false;
+			break;
+		}
+		original_grid_available = false;
+	}
+
+	if (uint32_t(Math::round(prepared_draw_state.debug_params[0])) != original_debug_view) {
+		prepared_draw_state.debug_params[0] = float(original_debug_view);
+		if (p_rd->buffer_update(draw_state_buffer, 0, sizeof(DrawState), &prepared_draw_state) == OK) {
+			_dispatch_resolve(p_rd);
+		} else {
+			ERR_PRINT("TexelSplat raw dump could not restore DrawState after auxiliary views.");
+			dump_succeeded = false;
+		}
+	}
+	if (!dump_succeeded) {
+		ERR_PRINT("TexelSplat raw dump frame is incomplete and must be rejected by validation.");
+	}
+}
+
+bool TexelSplatPipelineRD::_debug_write_screen_grid_dump(RenderingDevice *p_rd, uint32_t p_debug_view) {
+	ERR_FAIL_NULL_V(p_rd, false);
+
+	Vector<uint8_t> color_data = p_rd->texture_get_data(screen_grid.color, 0);
+	Vector<uint8_t> depth_data = p_rd->texture_get_data(screen_grid.depth, 0);
+	Vector<uint8_t> meta_data = p_rd->texture_get_data(screen_grid.meta, 0);
+	const uint64_t sample_count = uint64_t(screen_grid.size.x) * uint64_t(screen_grid.size.y);
+	if (uint64_t(color_data.size()) != sample_count * 8u || uint64_t(depth_data.size()) != sample_count * 4u || uint64_t(meta_data.size()) != sample_count * 8u) {
+		ERR_PRINT("TexelSplat raw dump readback size mismatch.");
+		return false;
+	}
+
+	const String dump_dir = ProjectSettings::get_singleton()->globalize_path(debug_raw_dump_path);
+	const uint32_t dump_source = uint32_t(CLAMP(int32_t(Math::round(prepared_draw_state.reprojection_control[3])), 0, 3));
+	const String file_name = vformat("tsraw_frame_%06d_view_%02d_source_%d.bin", debug_frame_index, p_debug_view, dump_source);
+	const String file_path = dump_dir.path_join(file_name);
+	Error file_error = OK;
+	Ref<FileAccess> file = FileAccess::open(file_path, FileAccess::WRITE, &file_error);
+	if (file_error != OK || file.is_null()) {
+		ERR_PRINT("TexelSplat raw dump could not open '" + file_path + "'.");
+		return false;
+	}
+
+	static const uint8_t magic[8] = { 'T', 'S', 'R', 'A', 'W', '0', '0', '1' };
+	file->store_buffer(magic, sizeof(magic));
+	file->store_32(1u);
+	file->store_64(debug_frame_index);
+	file->store_32(uint32_t(screen_grid.size.x));
+	file->store_32(uint32_t(screen_grid.size.y));
+	file->store_32(uint32_t(MAX(0.0f, prepared_draw_state.params[1])));
+	file->store_32(uint32_t(MAX(0.0f, prepared_draw_state.params[2])));
+	file->store_32(uint32_t(MAX(0.0f, prepared_draw_state.params[0])));
+	file->store_32(uint32_t(MAX(1.0f, prepared_draw_state.grid_params[2])));
+	file->store_32(p_debug_view);
+	file->store_32(dump_source);
+	file->store_64(sizeof(DrawState));
+	file->store_64(color_data.size());
+	file->store_64(depth_data.size());
+	file->store_64(meta_data.size());
+	file->store_buffer(reinterpret_cast<const uint8_t *>(&prepared_draw_state), sizeof(DrawState));
+	file->store_buffer(color_data);
+	file->store_buffer(depth_data);
+	file->store_buffer(meta_data);
+
+	print_line("TexelSplat raw_dump frame=" + String::num_uint64(debug_frame_index) +
+			" view=" + itos(p_debug_view) +
+			" source=" + itos(dump_source) +
+			" grid=" + itos(screen_grid.size.x) + "x" + itos(screen_grid.size.y) +
+			" path=" + file_path);
+	return true;
 }
 
 RID TexelSplatPipelineRD::get_probe_layer_framebuffer(uint32_t p_layer) const {
@@ -541,9 +653,10 @@ bool TexelSplatPipelineRD::ensure_screen_grid(const Size2i &p_viewport_size) {
 	_load_project_settings();
 
 	const Size2i requested_grid_size((p_viewport_size.x + int(pixel_scale) - 1) / int(pixel_scale), (p_viewport_size.y + int(pixel_scale) - 1) / int(pixel_scale));
+	const bool copy_from_requested = debug_raw_dump_enabled && debug_raw_dump_frame_count > 0 && !debug_raw_dump_path.is_empty();
 	if (screen_grid.color.is_valid() && screen_grid.depth.is_valid() && screen_grid.meta.is_valid() &&
 			screen_grid.resolve_uniform_set.is_valid() && screen_grid.composite_uniform_set.is_valid() &&
-			screen_grid.size == requested_grid_size) {
+			screen_grid.size == requested_grid_size && screen_grid.copy_from_enabled == copy_from_requested) {
 		return true;
 	}
 
@@ -566,18 +679,20 @@ bool TexelSplatPipelineRD::_create_screen_grid_resources(const Size2i &p_grid_si
 	ERR_FAIL_COND_V(draw_state_buffer.is_null(), false);
 	ERR_FAIL_COND_V(splat_flags_buffer.is_null(), false);
 
-	const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+	const bool copy_from_requested = debug_raw_dump_enabled && debug_raw_dump_frame_count > 0 && !debug_raw_dump_path.is_empty();
+	const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | (copy_from_requested ? RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT : 0u);
 	ERR_FAIL_COND_V_MSG(!_is_format_supported(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, "screen-grid color"), false, "Texel splatting screen-grid color texture format support check failed.");
 	ERR_FAIL_COND_V_MSG(!_is_format_supported(RD::DATA_FORMAT_R32_SFLOAT, usage_bits, "screen-grid depth"), false, "Texel splatting screen-grid depth texture format support check failed.");
 	ERR_FAIL_COND_V_MSG(!_is_format_supported(RD::DATA_FORMAT_R32G32_UINT, usage_bits, "screen-grid meta"), false, "Texel splatting screen-grid meta texture format support check failed.");
 
-	r_resources.color = _create_screen_grid_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_grid_size, "color");
+	r_resources.color = _create_screen_grid_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_grid_size, usage_bits, "color");
 	ERR_FAIL_COND_V(r_resources.color.is_null(), false);
-	r_resources.depth = _create_screen_grid_texture(RD::DATA_FORMAT_R32_SFLOAT, p_grid_size, "depth");
+	r_resources.depth = _create_screen_grid_texture(RD::DATA_FORMAT_R32_SFLOAT, p_grid_size, usage_bits, "depth");
 	ERR_FAIL_COND_V(r_resources.depth.is_null(), false);
-	r_resources.meta = _create_screen_grid_texture(RD::DATA_FORMAT_R32G32_UINT, p_grid_size, "meta");
+	r_resources.meta = _create_screen_grid_texture(RD::DATA_FORMAT_R32G32_UINT, p_grid_size, usage_bits, "meta");
 	ERR_FAIL_COND_V(r_resources.meta.is_null(), false);
 	r_resources.size = p_grid_size;
+	r_resources.copy_from_enabled = copy_from_requested;
 
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	ERR_FAIL_NULL_V(material_storage, false);
@@ -628,13 +743,13 @@ RD::DataFormat TexelSplatPipelineRD::_select_depth_format(uint32_t p_usage_bits)
 	return RD::DATA_FORMAT_MAX;
 }
 
-RID TexelSplatPipelineRD::_create_screen_grid_texture(RD::DataFormat p_format, const Size2i &p_size, const char *p_label) const {
+RID TexelSplatPipelineRD::_create_screen_grid_texture(RD::DataFormat p_format, const Size2i &p_size, uint32_t p_usage_bits, const char *p_label) const {
 	RD::TextureFormat texture_format;
 	texture_format.format = p_format;
 	texture_format.width = p_size.x;
 	texture_format.height = p_size.y;
 	texture_format.texture_type = RD::TEXTURE_TYPE_2D;
-	texture_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+	texture_format.usage_bits = p_usage_bits;
 
 	RID texture = RD::get_singleton()->texture_create(texture_format, RD::TextureView());
 	ERR_FAIL_COND_V_MSG(texture.is_null(), RID(), "Failed to create texel splatting screen-grid texture '" + String(p_label) + "'.");
@@ -801,6 +916,7 @@ void TexelSplatPipelineRD::_free_screen_grid_resources(ScreenGridResources &r_re
 		r_resources.meta = RID();
 	}
 	r_resources.size = Size2i();
+	r_resources.copy_from_enabled = false;
 }
 
 } // namespace RendererSceneRenderImplementation
