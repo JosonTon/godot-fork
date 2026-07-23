@@ -3725,10 +3725,11 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/capture_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), 0xFFFFFFFF);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/probe_size", PROPERTY_HINT_RANGE, "128,512,32"), 384);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/pixel_scale", PROPERTY_HINT_RANGE, "1,8,1"), 4);
+	GLOBAL_DEF_RST("rendering/renderer_rd/forward_plus/texel_splatting/experimental_owner_boundary_enabled", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/face_coverage_mode", PROPERTY_HINT_ENUM, "Conservative All Faces,Dylan Forward Cone"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/renderer_rd/forward_plus/texel_splatting/splat_expansion_texels", PROPERTY_HINT_RANGE, "0,2,0.05"), 0.5);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/transition_dither_mode", PROPERTY_HINT_ENUM, "Screen Bayer 4x4,World Hash"), 0);
-	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/view", PROPERTY_HINT_ENUM, "Albedo,Edge,Camera Distance,Normal,Object ID,Layer,Virtual Cell Footprint,Source Role,Base Surface Normal,Legacy Surface Alignment (Unsupported),Probe Texel ID,Legacy Raster Geometry (Unsupported),Validity,Probe UV/Face,Fallback Reason"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/view", PROPERTY_HINT_ENUM, "Albedo,Edge,Camera Distance,Normal,Object ID,Layer,Virtual Cell Footprint,Source Role,Base Surface Normal,Legacy Surface Alignment (Unsupported),Probe Texel ID,Legacy Raster Geometry (Unsupported),Validity,Probe UV/Face,Fallback Reason,Owner Boundary Role (Rejected Archive)"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/probe_layer", PROPERTY_HINT_RANGE, "-4,17,1"), -1);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/renderer_rd/forward_plus/texel_splatting/debug/resolve_source_mode", PROPERTY_HINT_ENUM, "Composed (Current/Previous/Eye),Eye Direct,Current Only,Previous Raw (Unweighted)"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/renderer_rd/forward_plus/texel_splatting/grid_step", PROPERTY_HINT_RANGE, "0.05,16.0,0.05,or_greater,suffix:m"), 1.0);

@@ -173,7 +173,7 @@ bool TexelSplatPipelineRD::prepare_resolve_and_composite(RID p_framebuffer, cons
 	draw_state.params[3] = MAX(p_camera_far, 0.001f);
 	draw_state.grid_params[0] = float(screen_grid.size.x);
 	draw_state.grid_params[1] = float(screen_grid.size.y);
-	draw_state.grid_params[2] = float(pixel_scale);
+	draw_state.grid_params[2] = owner_boundary_enabled ? 2.0f : float(pixel_scale);
 	draw_state.grid_params[3] = MAX(p_grid_step, 0.001f);
 	draw_state.debug_params[0] = float(debug_view);
 	draw_state.debug_params[1] = float(debug_probe_layer);
@@ -191,7 +191,7 @@ bool TexelSplatPipelineRD::prepare_resolve_and_composite(RID p_framebuffer, cons
 	draw_state.camera_position[0] = p_camera_position.x;
 	draw_state.camera_position[1] = p_camera_position.y;
 	draw_state.camera_position[2] = p_camera_position.z;
-	draw_state.camera_position[3] = 0.0f;
+	draw_state.camera_position[3] = owner_boundary_enabled ? 4.0f : 0.0f;
 	draw_state.transition_params[0] = CLAMP(p_transition_fade, 0.0f, 1.0f);
 	draw_state.transition_params[1] = float(p_current_probe_index);
 	draw_state.transition_params[2] = float(p_previous_probe_index);
@@ -287,6 +287,10 @@ void TexelSplatPipelineRD::_load_project_settings() {
 	reprojection_texel_tolerance_scale = MAX(0.25f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/texel_tolerance_scale")));
 	reprojection_search_back_tolerance_scale = MAX(1.0f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/search_back_tolerance_scale")));
 	reprojection_search_forward_tolerance_scale = MAX(0.25f, float(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/reprojection/search_forward_tolerance_scale")));
+	owner_boundary_enabled = bool(GLOBAL_GET("rendering/renderer_rd/forward_plus/texel_splatting/experimental_owner_boundary_enabled"));
+	if (owner_boundary_enabled) {
+		pixel_scale = 4;
+	}
 }
 
 uint32_t TexelSplatPipelineRD::normalize_probe_size(int32_t p_requested_size) {
@@ -359,8 +363,17 @@ void TexelSplatPipelineRD::_dispatch_resolve(RenderingDevice *p_rd) {
 	RD::ComputeListID compute_list = p_rd->compute_list_begin();
 	p_rd->compute_list_bind_compute_pipeline(compute_list, resolve_pipeline);
 	p_rd->compute_list_bind_uniform_set(compute_list, screen_grid.resolve_uniform_set, 0);
-	p_rd->compute_list_dispatch_threads(compute_list, screen_grid.size.x, screen_grid.size.y, 1);
+	const Size2i resolve_size = screen_grid.owner_boundary_enabled ? screen_grid.native_size : screen_grid.size;
+	p_rd->compute_list_dispatch_threads(compute_list, resolve_size.x, resolve_size.y, 1);
 	p_rd->compute_list_add_barrier(compute_list);
+	if (screen_grid.owner_boundary_enabled) {
+		DEV_ASSERT(owner_boundary_pipeline.is_valid());
+		DEV_ASSERT(screen_grid.owner_boundary_uniform_set.is_valid());
+		p_rd->compute_list_bind_compute_pipeline(compute_list, owner_boundary_pipeline);
+		p_rd->compute_list_bind_uniform_set(compute_list, screen_grid.owner_boundary_uniform_set, 0);
+		p_rd->compute_list_dispatch_threads(compute_list, screen_grid.size.x, screen_grid.size.y, 1);
+		p_rd->compute_list_add_barrier(compute_list);
+	}
 	p_rd->compute_list_end();
 }
 
@@ -374,6 +387,10 @@ void TexelSplatPipelineRD::_debug_dump_screen_grid(RenderingDevice *p_rd) {
 	}
 	if (!screen_grid.copy_from_enabled) {
 		ERR_PRINT_ONCE("TexelSplat raw dump requested without copy-from screen-grid resources.");
+		return;
+	}
+	if (screen_grid.owner_boundary_enabled) {
+		ERR_PRINT_ONCE("TexelSplat TSRAW v1 dump is disabled for the rejected owner-boundary archive because the format cannot encode P=4/N=2 ownership metadata.");
 		return;
 	}
 
@@ -619,6 +636,16 @@ bool TexelSplatPipelineRD::_create_draw_resources() {
 	resolve_pipeline = rd->compute_pipeline_create(resolve_shader_rd);
 	ERR_FAIL_COND_V_MSG(resolve_pipeline.is_null(), false, "Failed to create texel splatting screen-grid resolve pipeline.");
 
+	Vector<String> owner_boundary_modes;
+	owner_boundary_modes.push_back("");
+	owner_boundary_shader.initialize(owner_boundary_modes);
+	owner_boundary_shader_version = owner_boundary_shader.version_create();
+	owner_boundary_shader_rd = owner_boundary_shader.version_get_shader(owner_boundary_shader_version, 0);
+	ERR_FAIL_COND_V_MSG(owner_boundary_shader_rd.is_null(), false, "Failed to create texel splatting owner-boundary shader.");
+
+	owner_boundary_pipeline = rd->compute_pipeline_create(owner_boundary_shader_rd);
+	ERR_FAIL_COND_V_MSG(owner_boundary_pipeline.is_null(), false, "Failed to create texel splatting owner-boundary pipeline.");
+
 	Vector<String> composite_modes;
 	composite_modes.push_back("");
 	composite_shader.initialize(composite_modes);
@@ -652,16 +679,21 @@ bool TexelSplatPipelineRD::ensure_screen_grid(const Size2i &p_viewport_size) {
 
 	_load_project_settings();
 
-	const Size2i requested_grid_size((p_viewport_size.x + int(pixel_scale) - 1) / int(pixel_scale), (p_viewport_size.y + int(pixel_scale) - 1) / int(pixel_scale));
+	const Size2i requested_grid_size = owner_boundary_enabled ?
+			Size2i(((p_viewport_size.x + 3) / 4) * 2, ((p_viewport_size.y + 3) / 4) * 2) :
+			Size2i((p_viewport_size.x + int(pixel_scale) - 1) / int(pixel_scale), (p_viewport_size.y + int(pixel_scale) - 1) / int(pixel_scale));
 	const bool copy_from_requested = debug_raw_dump_enabled && debug_raw_dump_frame_count > 0 && !debug_raw_dump_path.is_empty();
 	if (screen_grid.color.is_valid() && screen_grid.depth.is_valid() && screen_grid.meta.is_valid() &&
+			screen_grid.native_camera_depth.is_valid() && screen_grid.native_albedo.is_valid() && screen_grid.native_normal.is_valid() &&
 			screen_grid.resolve_uniform_set.is_valid() && screen_grid.composite_uniform_set.is_valid() &&
-			screen_grid.size == requested_grid_size && screen_grid.copy_from_enabled == copy_from_requested) {
+			(!owner_boundary_enabled || (screen_grid.native_color.is_valid() && screen_grid.native_depth.is_valid() && screen_grid.native_meta.is_valid() && screen_grid.owner_boundary_uniform_set.is_valid())) &&
+			screen_grid.size == requested_grid_size && screen_grid.native_size == p_viewport_size &&
+			screen_grid.owner_boundary_enabled == owner_boundary_enabled && screen_grid.copy_from_enabled == copy_from_requested) {
 		return true;
 	}
 
 	ScreenGridResources new_resources;
-	if (!_create_screen_grid_resources(requested_grid_size, new_resources)) {
+	if (!_create_screen_grid_resources(requested_grid_size, p_viewport_size, owner_boundary_enabled, new_resources)) {
 		_free_screen_grid_resources(new_resources);
 		return false;
 	}
@@ -671,10 +703,11 @@ bool TexelSplatPipelineRD::ensure_screen_grid(const Size2i &p_viewport_size) {
 	return true;
 }
 
-bool TexelSplatPipelineRD::_create_screen_grid_resources(const Size2i &p_grid_size, ScreenGridResources &r_resources) {
+bool TexelSplatPipelineRD::_create_screen_grid_resources(const Size2i &p_grid_size, const Size2i &p_viewport_size, bool p_owner_boundary_enabled, ScreenGridResources &r_resources) {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
 	ERR_FAIL_COND_V(resolve_shader_rd.is_null(), false);
+	ERR_FAIL_COND_V(owner_boundary_shader_rd.is_null(), false);
 	ERR_FAIL_COND_V(composite_shader_rd.is_null(), false);
 	ERR_FAIL_COND_V(draw_state_buffer.is_null(), false);
 	ERR_FAIL_COND_V(splat_flags_buffer.is_null(), false);
@@ -692,7 +725,25 @@ bool TexelSplatPipelineRD::_create_screen_grid_resources(const Size2i &p_grid_si
 	r_resources.meta = _create_screen_grid_texture(RD::DATA_FORMAT_R32G32_UINT, p_grid_size, usage_bits, "meta");
 	ERR_FAIL_COND_V(r_resources.meta.is_null(), false);
 	r_resources.size = p_grid_size;
+	r_resources.native_size = p_viewport_size;
+	r_resources.owner_boundary_enabled = p_owner_boundary_enabled;
 	r_resources.copy_from_enabled = copy_from_requested;
+
+	const Size2i resolve_target_size = p_owner_boundary_enabled ? p_viewport_size : p_grid_size;
+	if (p_owner_boundary_enabled) {
+		r_resources.native_color = _create_screen_grid_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, resolve_target_size, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, "owner-boundary native color");
+		ERR_FAIL_COND_V(r_resources.native_color.is_null(), false);
+		r_resources.native_depth = _create_screen_grid_texture(RD::DATA_FORMAT_R32_SFLOAT, resolve_target_size, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, "owner-boundary native depth");
+		ERR_FAIL_COND_V(r_resources.native_depth.is_null(), false);
+		r_resources.native_meta = _create_screen_grid_texture(RD::DATA_FORMAT_R32G32_UINT, resolve_target_size, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, "owner-boundary native meta");
+		ERR_FAIL_COND_V(r_resources.native_meta.is_null(), false);
+	}
+	r_resources.native_camera_depth = _create_screen_grid_texture(RD::DATA_FORMAT_R32_SFLOAT, resolve_target_size, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, "owner-boundary camera depth");
+	ERR_FAIL_COND_V(r_resources.native_camera_depth.is_null(), false);
+	r_resources.native_albedo = _create_screen_grid_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, resolve_target_size, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, "owner-boundary albedo");
+	ERR_FAIL_COND_V(r_resources.native_albedo.is_null(), false);
+	r_resources.native_normal = _create_screen_grid_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, resolve_target_size, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, "owner-boundary normal");
+	ERR_FAIL_COND_V(r_resources.native_normal.is_null(), false);
 
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	ERR_FAIL_NULL_V(material_storage, false);
@@ -707,12 +758,31 @@ bool TexelSplatPipelineRD::_create_screen_grid_resources(const Size2i &p_grid_si
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, probe_textures[PROBE_TEXTURE_OBJECT_ID].texture })));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, splat_flags_buffer));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, draw_state_buffer));
-	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, r_resources.color));
-	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, r_resources.depth));
-	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, r_resources.meta));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, p_owner_boundary_enabled ? r_resources.native_color : r_resources.color));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, p_owner_boundary_enabled ? r_resources.native_depth : r_resources.depth));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_owner_boundary_enabled ? r_resources.native_meta : r_resources.meta));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, r_resources.native_camera_depth));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, r_resources.native_albedo));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 11, r_resources.native_normal));
 
 	r_resources.resolve_uniform_set = rd->uniform_set_create(resolve_uniforms, resolve_shader_rd, 0);
 	ERR_FAIL_COND_V_MSG(r_resources.resolve_uniform_set.is_null(), false, "Failed to create texel splatting screen-grid resolve uniform set.");
+
+	if (p_owner_boundary_enabled) {
+		Vector<RD::Uniform> owner_boundary_uniforms;
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, r_resources.native_color })));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, r_resources.native_depth })));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, r_resources.native_meta })));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, r_resources.native_camera_depth })));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, r_resources.native_albedo })));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, r_resources.native_normal })));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, draw_state_buffer));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, r_resources.color));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, r_resources.depth));
+		owner_boundary_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, r_resources.meta));
+		r_resources.owner_boundary_uniform_set = rd->uniform_set_create(owner_boundary_uniforms, owner_boundary_shader_rd, 0);
+		ERR_FAIL_COND_V_MSG(r_resources.owner_boundary_uniform_set.is_null(), false, "Failed to create texel splatting owner-boundary uniform set.");
+	}
 
 	Vector<RD::Uniform> composite_uniforms;
 	composite_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, r_resources.color })));
@@ -870,6 +940,10 @@ void TexelSplatPipelineRD::_free_draw_resources() {
 		rd->free_rid(resolve_pipeline);
 		resolve_pipeline = RID();
 	}
+	if (owner_boundary_pipeline.is_valid()) {
+		rd->free_rid(owner_boundary_pipeline);
+		owner_boundary_pipeline = RID();
+	}
 
 	if (draw_state_buffer.is_valid()) {
 		rd->free_rid(draw_state_buffer);
@@ -881,6 +955,12 @@ void TexelSplatPipelineRD::_free_draw_resources() {
 		resolve_shader_version = RID();
 	}
 	resolve_shader_rd = RID();
+
+	if (owner_boundary_shader_version.is_valid()) {
+		owner_boundary_shader.version_free(owner_boundary_shader_version);
+		owner_boundary_shader_version = RID();
+	}
+	owner_boundary_shader_rd = RID();
 
 	if (composite_shader_version.is_valid()) {
 		composite_shader.version_free(composite_shader_version);
@@ -897,6 +977,11 @@ void TexelSplatPipelineRD::_free_screen_grid_resources(ScreenGridResources &r_re
 		rd->free_rid(r_resources.resolve_uniform_set);
 	}
 	r_resources.resolve_uniform_set = RID();
+
+	if (r_resources.owner_boundary_uniform_set.is_valid() && rd->uniform_set_is_valid(r_resources.owner_boundary_uniform_set)) {
+		rd->free_rid(r_resources.owner_boundary_uniform_set);
+	}
+	r_resources.owner_boundary_uniform_set = RID();
 
 	if (r_resources.composite_uniform_set.is_valid() && rd->uniform_set_is_valid(r_resources.composite_uniform_set)) {
 		rd->free_rid(r_resources.composite_uniform_set);
@@ -915,7 +1000,33 @@ void TexelSplatPipelineRD::_free_screen_grid_resources(ScreenGridResources &r_re
 		rd->free_rid(r_resources.meta);
 		r_resources.meta = RID();
 	}
+	if (r_resources.native_color.is_valid()) {
+		rd->free_rid(r_resources.native_color);
+		r_resources.native_color = RID();
+	}
+	if (r_resources.native_depth.is_valid()) {
+		rd->free_rid(r_resources.native_depth);
+		r_resources.native_depth = RID();
+	}
+	if (r_resources.native_meta.is_valid()) {
+		rd->free_rid(r_resources.native_meta);
+		r_resources.native_meta = RID();
+	}
+	if (r_resources.native_camera_depth.is_valid()) {
+		rd->free_rid(r_resources.native_camera_depth);
+		r_resources.native_camera_depth = RID();
+	}
+	if (r_resources.native_albedo.is_valid()) {
+		rd->free_rid(r_resources.native_albedo);
+		r_resources.native_albedo = RID();
+	}
+	if (r_resources.native_normal.is_valid()) {
+		rd->free_rid(r_resources.native_normal);
+		r_resources.native_normal = RID();
+	}
 	r_resources.size = Size2i();
+	r_resources.native_size = Size2i();
+	r_resources.owner_boundary_enabled = false;
 	r_resources.copy_from_enabled = false;
 }
 

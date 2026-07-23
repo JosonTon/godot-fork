@@ -37,6 +37,9 @@ draw_state;
 layout(rgba16f, set = 0, binding = 6) uniform restrict writeonly image2D grid_color;
 layout(r32f, set = 0, binding = 7) uniform restrict writeonly image2D grid_depth;
 layout(rg32ui, set = 0, binding = 8) uniform restrict writeonly uimage2D grid_meta;
+layout(r32f, set = 0, binding = 9) uniform restrict writeonly image2D native_camera_depth;
+layout(rgba16f, set = 0, binding = 10) uniform restrict writeonly image2D native_albedo;
+layout(rgba16f, set = 0, binding = 11) uniform restrict writeonly image2D native_normal;
 
 const uint FLAG_DEBUG_EDGE = 2u;
 const uint FLAG_ALTERNATE_ROLE_FILL = 4u;
@@ -532,13 +535,14 @@ vec3 debug_color(uint p_debug_view, vec4 p_albedo, vec4 p_encoded_normals, uint 
 
 void main() {
 	ivec2 grid_coord = ivec2(gl_GlobalInvocationID.xy);
-	ivec2 grid_size = ivec2(draw_state.grid_params.xy);
+	bool owner_boundary_mode = draw_state.camera_position.w > 0.5;
+	ivec2 grid_size = owner_boundary_mode ? ivec2(draw_state.params.yz) : ivec2(draw_state.grid_params.xy);
 	if (grid_coord.x >= grid_size.x || grid_coord.y >= grid_size.y) {
 		return;
 	}
 
 	vec2 viewport_size = draw_state.params.yz;
-	float pixel_scale = max(draw_state.grid_params.z, 1.0);
+	float pixel_scale = owner_boundary_mode ? 1.0 : max(draw_state.grid_params.z, 1.0);
 	vec2 pixel_center = min((vec2(grid_coord) + vec2(0.5)) * pixel_scale, max(viewport_size - vec2(0.5), vec2(0.5)));
 	vec2 ndc = pixel_center / max(viewport_size, vec2(1.0)) * 2.0 - 1.0;
 
@@ -679,8 +683,8 @@ void main() {
 	vec4 albedo = texelFetch(probe_albedo, sample_coord, 0);
 	vec4 encoded_normals = texelFetch(probe_normal, sample_coord, 0);
 	uint flags = splat_flags.data[texel_index(selected_sample.layer, selected_sample.probe_coord, probe_size)] | selection_flags;
-	uint debug_view = uint(clamp(round(draw_state.debug_params.x), 0.0, 14.0));
-	if (debug_view == 1u && (flags & FLAG_DEBUG_EDGE) == 0u) {
+	uint debug_view = uint(clamp(round(draw_state.debug_params.x), 0.0, 15.0));
+	if (!owner_boundary_mode && debug_view == 1u && (flags & FLAG_DEBUG_EDGE) == 0u) {
 		store_invalid(grid_coord, fallback_reason, selected_sample.object_id, total_step_count);
 		return;
 	}
@@ -691,4 +695,10 @@ void main() {
 	imageStore(grid_color, grid_coord, vec4(color, alpha));
 	imageStore(grid_depth, grid_coord, vec4(clip_depth));
 	imageStore(grid_meta, grid_coord, uvec4(meta, selected_sample.object_id, 0u, 0u));
+	if (owner_boundary_mode) {
+		vec3 reference_albedo = debug_color(0u, albedo, encoded_normals, selected_sample.object_id, selected_sample.layer, flags, selected_sample.uv, t_hit, source_role, fallback_reason);
+		imageStore(native_camera_depth, grid_coord, vec4(t_hit));
+		imageStore(native_albedo, grid_coord, vec4(reference_albedo, albedo.a));
+		imageStore(native_normal, grid_coord, encoded_normals);
+	}
 }

@@ -36,6 +36,7 @@
 #include "core/templates/vector.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_composite.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_owner_boundary.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_process.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/texel_splat/texel_splat_resolve.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
@@ -155,6 +156,7 @@ class TexelSplatPipelineRD {
 		DEBUG_VIEW_VALIDITY,
 		DEBUG_VIEW_PROBE_UV_FACE,
 		DEBUG_VIEW_FALLBACK_REASON,
+		DEBUG_VIEW_OWNER_BOUNDARY_ROLE,
 		DEBUG_VIEW_MAX
 	};
 
@@ -162,9 +164,18 @@ class TexelSplatPipelineRD {
 		RID color;
 		RID depth;
 		RID meta;
+		RID native_color;
+		RID native_depth;
+		RID native_meta;
+		RID native_camera_depth;
+		RID native_albedo;
+		RID native_normal;
 		RID resolve_uniform_set;
+		RID owner_boundary_uniform_set;
 		RID composite_uniform_set;
 		Size2i size;
+		Size2i native_size;
+		bool owner_boundary_enabled = false;
 		bool copy_from_enabled = false;
 	};
 
@@ -172,15 +183,19 @@ class TexelSplatPipelineRD {
 	ProbeLayerData probe_layers[PROBE_LAYER_COUNT];
 	TexelSplatProcessShaderRD process_shader;
 	TexelSplatResolveShaderRD resolve_shader;
+	TexelSplatOwnerBoundaryShaderRD owner_boundary_shader;
 	TexelSplatCompositeShaderRD composite_shader;
 	RID process_shader_version;
 	RID resolve_shader_version;
+	RID owner_boundary_shader_version;
 	RID composite_shader_version;
 	RID process_shader_rd;
 	RID resolve_shader_rd;
+	RID owner_boundary_shader_rd;
 	RID composite_shader_rd;
 	RID process_pipeline;
 	RID resolve_pipeline;
+	RID owner_boundary_pipeline;
 	PipelineCacheRD composite_pipeline;
 	RID process_uniform_set;
 	RID visible_refs_buffer;
@@ -217,6 +232,7 @@ class TexelSplatPipelineRD {
 	float reprojection_texel_tolerance_scale = 1.5f;
 	float reprojection_search_back_tolerance_scale = 4.0f;
 	float reprojection_search_forward_tolerance_scale = 1.0f;
+	bool owner_boundary_enabled = false;
 	bool initialized = false;
 	bool composite_prepared = false;
 
@@ -225,7 +241,7 @@ class TexelSplatPipelineRD {
 	bool _create_probe_framebuffers();
 	bool _create_process_resources();
 	bool _create_draw_resources();
-	bool _create_screen_grid_resources(const Size2i &p_grid_size, ScreenGridResources &r_resources);
+	bool _create_screen_grid_resources(const Size2i &p_grid_size, const Size2i &p_viewport_size, bool p_owner_boundary_enabled, ScreenGridResources &r_resources);
 	void _dispatch_resolve(RenderingDevice *p_rd);
 	void _debug_log_counters(RenderingDevice *p_rd);
 	void _debug_dump_screen_grid(RenderingDevice *p_rd);

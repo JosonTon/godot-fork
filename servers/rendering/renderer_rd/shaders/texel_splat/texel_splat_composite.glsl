@@ -43,8 +43,21 @@ const uint META_VALID = 1u;
 
 void main() {
 	ivec2 pixel = ivec2(gl_FragCoord.xy);
-	int pixel_scale = max(int(round(draw_state.grid_params.z)), 1);
-	ivec2 cell = pixel / pixel_scale;
+	ivec2 cell;
+	if (draw_state.camera_position.w > 0.5) {
+		const int owner_pixel_scale = 4;
+		const int owner_subdivisions = 2;
+		ivec2 viewport_size = ivec2(draw_state.params.yz);
+		ivec2 coarse = pixel / owner_pixel_scale;
+		ivec2 origin = coarse * owner_pixel_scale;
+		ivec2 extent = max(min(ivec2(owner_pixel_scale), viewport_size - origin), ivec2(1));
+		ivec2 local = pixel - origin;
+		ivec2 subcell = min((local * owner_subdivisions) / extent, ivec2(owner_subdivisions - 1));
+		cell = coarse * owner_subdivisions + subcell;
+	} else {
+		int pixel_scale = max(int(round(draw_state.grid_params.z)), 1);
+		cell = pixel / pixel_scale;
+	}
 	ivec2 grid_size = ivec2(draw_state.grid_params.xy);
 	if (any(lessThan(cell, ivec2(0))) || any(greaterThanEqual(cell, grid_size))) {
 		discard;
